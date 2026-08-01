@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "book_quiz",
+  "project_id": "66b9cd00-209d-474f-843e-bec4bc7bd7cc"
+}
