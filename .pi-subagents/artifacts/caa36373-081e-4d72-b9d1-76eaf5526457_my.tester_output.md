@@ -1,0 +1,1 @@
+No Docker, no local Postgres. Let me check what options exist for a test database.
