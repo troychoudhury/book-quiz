@@ -24,7 +24,7 @@ class HydrationResult:
     status: str  # 'pending', 'processing', 'completed', 'failed'
     books_processed: int = 0
     questions_generated: int = 0
-    errors: list[str] = None
+    errors: list[str] | None = None
 
     def __post_init__(self):
         if self.errors is None:

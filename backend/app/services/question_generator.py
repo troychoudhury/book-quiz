@@ -7,7 +7,6 @@ book chapters focusing on:
 - Characters and emotions
 - Morals, outcomes, and interpretations
 """
-import json
 import logging
 from dataclasses import dataclass
 from typing import Optional

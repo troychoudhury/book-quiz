@@ -2,19 +2,35 @@
 
 These tests define the expected behavior from a user's perspective.
 They use the FastAPI TestClient to make real HTTP requests.
+
+Environment setup:
+- JWT_SECRET_KEY must be set (the app now requires it, no insecure default).
+- RATE_LIMIT_ENABLED=false disables rate limiting so the test suite can
+  register/login many times from the same test client without hitting limits.
 """
+import os
+
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-acceptance-tests")
+os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
+os.environ.setdefault("ENVIRONMENT", "test")
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.main import app
 from app.core.database import get_db
 from app.models.base import Base
 
-# In-memory SQLite for acceptance tests
-SQLALCHEMY_DATABASE_URL = "sqlite:///./test_acceptance.db"
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+# In-memory SQLite for acceptance tests (no file artifacts, no cross-run state)
+SQLALCHEMY_DATABASE_URL = "sqlite://"
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL,
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

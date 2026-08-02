@@ -1,6 +1,5 @@
 """Book model for quiz subjects."""
 from sqlalchemy import Integer, String, Text
-from sqlalchemy.dialects.postgresql import INT4RANGE
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base
 

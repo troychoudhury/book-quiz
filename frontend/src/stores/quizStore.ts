@@ -26,7 +26,14 @@ export const useQuizStore = create<QuizState>((set, get) => ({
   results: null,
 
   startQuiz: (attemptId, questions) =>
-    set({ phase: 'in-progress', attemptId, questions, currentIndex: 0, answers: [], results: null }),
+    set({
+      phase: 'in-progress',
+      attemptId,
+      questions,
+      currentIndex: 0,
+      answers: [],
+      results: null,
+    }),
 
   answerQuestion: (questionId, choiceId, isCorrect) => {
     const { answers, currentIndex, questions } = get();
@@ -48,5 +55,12 @@ export const useQuizStore = create<QuizState>((set, get) => ({
   completeQuiz: (results) => set({ phase: 'complete', results }),
 
   reset: () =>
-    set({ phase: 'idle', attemptId: null, questions: [], currentIndex: 0, answers: [], results: null }),
+    set({
+      phase: 'idle',
+      attemptId: null,
+      questions: [],
+      currentIndex: 0,
+      answers: [],
+      results: null,
+    }),
 }));

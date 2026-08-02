@@ -1,4 +1,6 @@
 """Database engine and session management."""
+from collections.abc import Generator
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from app.core.config import get_settings
@@ -16,7 +18,7 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-def get_db() -> Session:
+def get_db() -> Generator[Session, None, None]:
     """FastAPI dependency that yields a database session."""
     db = SessionLocal()
     try:

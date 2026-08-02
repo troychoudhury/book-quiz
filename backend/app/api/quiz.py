@@ -1,37 +1,46 @@
 """Quiz API endpoints."""
-import uuid
 import random
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.security import get_optional_current_user
 from app.models.book import Book
 from app.models.question import Question, Choice
 from app.models.quiz import QuizAttempt, QuizAnswer
 from app.models.user import User
 from app.schemas.quiz import (
-    StartQuizRequest, StartQuizResponse, QuestionResponse, ChoiceResponse,
-    AnswerRequest, AnswerResponse, CompleteQuizRequest, CompleteQuizResponse,
+    StartQuizRequest,
+    StartQuizResponse,
+    QuestionResponse,
+    ChoiceResponse,
+    AnswerRequest,
+    AnswerResponse,
+    CompleteQuizRequest,
+    CompleteQuizResponse,
     QuizResultItem,
 )
 
 router = APIRouter(prefix="/api/v1/quizzes", tags=["quizzes"])
 
-
-def _get_or_create_user(db: Session, user_id: str | None) -> User | None:
-    if not user_id:
-        return None
-    try:
-        return db.query(User).filter(User.id == uuid.UUID(user_id)).first()
-    except ValueError:
-        return None
+QUIZ_QUESTION_COUNT = 10
 
 
 @router.post("/start", response_model=StartQuizResponse, status_code=status.HTTP_201_CREATED)
-def start_quiz(request: StartQuizRequest, db: Session = Depends(get_db)):
-    """Start a new quiz for a book. Selects 10 random unanswered questions."""
+def start_quiz(
+    request: StartQuizRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_current_user),
+):
+    """Start a new quiz for a book. Selects 10 random unanswered questions.
+
+    For authenticated users, previously answered questions (across all their
+    attempts for this book) are excluded so retakes always surface fresh
+    questions. Guests get a random selection.
+    """
     try:
         book_id = uuid.UUID(request.book_id)
     except ValueError:
@@ -41,40 +50,69 @@ def start_quiz(request: StartQuizRequest, db: Session = Depends(get_db)):
     if not book:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Book not found.")
 
-    # Get all questions for the book
     all_questions = db.query(Question).filter(Question.book_id == book_id).all()
     if not all_questions:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No questions available for this book.")
 
-    # Select 10 random questions (or all if fewer)
-    selected = random.sample(all_questions, min(10, len(all_questions)))
+    # Exclude questions the user has already answered (if authenticated).
+    answered_ids: set[uuid.UUID] = set()
+    if current_user is not None:
+        answered_rows = (
+            db.query(QuizAnswer.question_id)
+            .join(QuizAttempt, QuizAttempt.id == QuizAnswer.attempt_id)
+            .filter(QuizAttempt.user_id == current_user.id)
+            .distinct()
+            .all()
+        )
+        answered_ids = {row[0] for row in answered_rows}
 
-    # Shuffle choices for each question
+    available = [q for q in all_questions if q.id not in answered_ids]
+    if not available:
+        # User has answered every question; offer a full retake over all questions.
+        available = all_questions
+
+    selected = random.sample(available, min(QUIZ_QUESTION_COUNT, len(available)))
+
+    # Determine attempt number for this user/book.
+    attempt_number = 1
+    if current_user is not None:
+        last_attempt = (
+            db.query(QuizAttempt)
+            .filter(
+                QuizAttempt.user_id == current_user.id,
+                QuizAttempt.book_id == book_id,
+            )
+            .order_by(QuizAttempt.attempt_number.desc())
+            .first()
+        )
+        if last_attempt is not None:
+            attempt_number = last_attempt.attempt_number + 1
+
+    # Build responses WITHOUT mutating stored choice positions. The canonical
+    # A–D ordering in the DB must never be rewritten by a quiz start.
     question_responses = []
     for i, question in enumerate(selected):
-        choices = list(question.choices)
-        random.shuffle(choices)
-        # Re-index positions after shuffle
-        for j, c in enumerate(choices):
-            c.position = j
-        question_responses.append(QuestionResponse(
-            id=str(question.id),
-            question_number=i + 1,
-            question_text=question.question_text,
-            chapter=question.chapter,
-            chapter_title=question.chapter_title,
-            choices=[
-                ChoiceResponse(id=str(c.id), text=c.choice_text, position=c.position)
-                for c in choices
-            ],
-        ))
+        shuffled = list(question.choices)
+        random.shuffle(shuffled)
+        question_responses.append(
+            QuestionResponse(
+                id=str(question.id),
+                question_number=i + 1,
+                question_text=question.question_text,
+                chapter=question.chapter,
+                chapter_title=question.chapter_title,
+                choices=[
+                    ChoiceResponse(id=str(c.id), text=c.choice_text, position=idx)
+                    for idx, c in enumerate(shuffled)
+                ],
+            )
+        )
 
-    # Create attempt record
     attempt = QuizAttempt(
-        user_id=None,  # Guest attempt; linked later if user authenticates
+        user_id=current_user.id if current_user else None,
         book_id=book_id,
         total_questions=len(selected),
-        attempt_number=1,
+        attempt_number=attempt_number,
     )
     db.add(attempt)
     db.commit()
@@ -107,10 +145,35 @@ def answer_question(
     if not question:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Question not found.")
 
-    correct_choice = next((c for c in question.choices if c.is_correct), None)
-    is_correct = str(correct_choice.id) == request.choice_id if correct_choice else False
+    # The question must belong to the attempt's book.
+    if question.book_id != attempt.book_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Question does not belong to this quiz attempt.",
+        )
 
-    # Record the answer
+    # The choice must belong to this question.
+    choice = db.query(Choice).filter(Choice.id == cid, Choice.question_id == qid).first()
+    if not choice:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Choice does not belong to this question.",
+        )
+
+    # Prevent duplicate answers for the same question within this attempt.
+    already_answered = (
+        db.query(QuizAnswer)
+        .filter(QuizAnswer.attempt_id == aid, QuizAnswer.question_id == qid)
+        .first()
+    )
+    if already_answered:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Question already answered in this attempt.",
+        )
+
+    is_correct = choice.is_correct
+
     answer = QuizAnswer(
         attempt_id=aid,
         question_id=qid,
@@ -120,12 +183,11 @@ def answer_question(
     db.add(answer)
     db.commit()
 
-    # Find question number in this attempt
     answered_count = db.query(QuizAnswer).filter(QuizAnswer.attempt_id == aid).count()
 
     return AnswerResponse(
         is_correct=is_correct,
-        correct_choice_id=str(correct_choice.id) if correct_choice else "",
+        correct_choice_id=str(choice.id) if is_correct else "",
         question_number=answered_count,
     )
 
@@ -133,7 +195,7 @@ def answer_question(
 @router.post("/{attempt_id}/complete", response_model=CompleteQuizResponse)
 def complete_quiz(
     attempt_id: str,
-    request: CompleteQuizRequest = CompleteQuizRequest(),
+    request: CompleteQuizRequest | None = None,
     db: Session = Depends(get_db),
 ):
     """Complete a quiz attempt and calculate final score."""
@@ -149,6 +211,12 @@ def complete_quiz(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Quiz already completed.")
 
     answers = db.query(QuizAnswer).filter(QuizAnswer.attempt_id == aid).all()
+    if not answers:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot complete a quiz with no answers.",
+        )
+
     score = sum(1 for a in answers if a.is_correct)
     total = len(answers)
 
@@ -158,20 +226,25 @@ def complete_quiz(
     db.commit()
     db.refresh(attempt)
 
-    # Build result items
     results = []
     for a in answers:
         q = db.query(Question).filter(Question.id == a.question_id).first()
-        correct_c = db.query(Choice).filter(Choice.question_id == a.question_id, Choice.is_correct == True).first()
+        correct_c = (
+            db.query(Choice)
+            .filter(Choice.question_id == a.question_id, Choice.is_correct.is_(True))
+            .first()
+        )
         selected_c = db.query(Choice).filter(Choice.id == a.selected_choice_id).first()
-        results.append(QuizResultItem(
-            question_id=str(a.question_id),
-            question_text=q.question_text if q else "",
-            selected_choice=selected_c.choice_text if selected_c else "",
-            correct_choice=correct_c.choice_text if correct_c else "",
-            is_correct=a.is_correct,
-            chapter=q.chapter if q else 0,
-        ))
+        results.append(
+            QuizResultItem(
+                question_id=str(a.question_id),
+                question_text=q.question_text if q else "",
+                selected_choice=selected_c.choice_text if selected_c else "",
+                correct_choice=correct_c.choice_text if correct_c else "",
+                is_correct=a.is_correct,
+                chapter=q.chapter if q else 0,
+            )
+        )
 
     return CompleteQuizResponse(
         attempt_id=str(attempt.id),

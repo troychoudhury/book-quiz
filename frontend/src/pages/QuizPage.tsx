@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useState } from 'react';
+import { Link, useParams, useNavigate } from 'react-router-dom';
 import { quizApi } from '../services/api';
 import { useQuizStore } from '../stores/quizStore';
 import type { ChoiceResponse } from '../types';
@@ -7,10 +7,8 @@ import type { ChoiceResponse } from '../types';
 export default function QuizPage() {
   const { attemptId } = useParams<{ attemptId: string }>();
   const navigate = useNavigate();
-  const {
-    phase, questions, currentIndex, startQuiz, answerQuestion,
-    nextQuestion, completeQuiz, results,
-  } = useQuizStore();
+  const { phase, questions, currentIndex, answerQuestion, nextQuestion, completeQuiz, results } =
+    useQuizStore();
   const [selectedChoice, setSelectedChoice] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ isCorrect: boolean; correctId: string } | null>(null);
   const [email, setEmail] = useState('');
@@ -53,7 +51,18 @@ export default function QuizPage() {
   };
 
   if (phase === 'idle') {
-    return <div className="flex items-center justify-center min-h-screen">Loading quiz...</div>;
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-center">
+          <p className="text-gray-500 mb-4">
+            This quiz session is missing. Start a new quiz from a book page.
+          </p>
+          <Link to="/" className="text-blue-600 hover:underline">
+            Back to home
+          </Link>
+        </div>
+      </div>
+    );
   }
 
   if (phase === 'complete' && results) {
@@ -75,7 +84,9 @@ export default function QuizPage() {
         {/* Progress bar */}
         <div className="mb-6">
           <div className="flex justify-between text-sm text-gray-600 mb-2">
-            <span>Question {currentIndex + 1} of {questions.length}</span>
+            <span>
+              Question {currentIndex + 1} of {questions.length}
+            </span>
             <span>{Math.round(progress)}%</span>
           </div>
           <div className="w-full bg-gray-200 rounded-full h-2">
@@ -89,7 +100,8 @@ export default function QuizPage() {
         {/* Question card */}
         <div className="bg-white rounded-xl shadow-sm p-6 mb-4">
           <span className="text-sm text-gray-500">
-            Chapter {currentQuestion.chapter}{currentQuestion.chapter_title ? `: ${currentQuestion.chapter_title}` : ''}
+            Chapter {currentQuestion.chapter}
+            {currentQuestion.chapter_title ? `: ${currentQuestion.chapter_title}` : ''}
           </span>
           <h2 className="text-xl font-semibold mt-2 mb-6">{currentQuestion.question_text}</h2>
 
@@ -97,7 +109,8 @@ export default function QuizPage() {
             {currentQuestion.choices.map((choice) => {
               let buttonClass = 'w-full text-left p-4 rounded-lg border-2 transition ';
               if (!selectedChoice) {
-                buttonClass += 'border-gray-200 hover:border-blue-400 hover:bg-blue-50 cursor-pointer';
+                buttonClass +=
+                  'border-gray-200 hover:border-blue-400 hover:bg-blue-50 cursor-pointer';
               } else if (feedback) {
                 if (choice.id === feedback.correctId) {
                   buttonClass += 'border-green-500 bg-green-50';
@@ -107,9 +120,8 @@ export default function QuizPage() {
                   buttonClass += 'border-gray-200 opacity-50';
                 }
               } else {
-                buttonClass += choice.id === selectedChoice
-                  ? 'border-blue-500 bg-blue-50'
-                  : 'border-gray-200';
+                buttonClass +=
+                  choice.id === selectedChoice ? 'border-blue-500 bg-blue-50' : 'border-gray-200';
               }
 
               return (
@@ -128,7 +140,9 @@ export default function QuizPage() {
 
           {/* Feedback */}
           {feedback && (
-            <div className={`mt-4 p-4 rounded-lg ${feedback.isCorrect ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+            <div
+              className={`mt-4 p-4 rounded-lg ${feedback.isCorrect ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}
+            >
               {feedback.isCorrect ? '✅ Correct!' : '❌ Incorrect.'}
             </div>
           )}

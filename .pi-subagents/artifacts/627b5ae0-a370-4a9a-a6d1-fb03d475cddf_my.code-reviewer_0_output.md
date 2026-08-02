@@ -1,0 +1,108 @@
+# Foundation Code Review — 5 Foundation Tasks (status_implement_review)
+
+**Reviewer:** Lead Code Reviewer (code-reviewer role)
+**Date:** 2026-08-02
+**Scope:** All code under `backend/` and `frontend/` plus build/deploy config, against tasks
+book-quiz-3k7 (repo structure), book-quiz-3c4 (DB schema + migrations), book-quiz-72g (FastAPI skeleton),
+book-quiz-op6 (auth), book-quiz-omu (React skeleton). No files were modified.
+
+## Verdict by Task
+
+| Task | Status | Evidence |
+|---|---|---|
+| 3k7 Repo structure | **FAIL** | No Makefile, no docker-compose, no venv, no npm project, no pre-commit hooks. Dockerfiles reference missing files. |
+| 3c4 DB schema + migrations | **FAIL** | 6 ORM models exist, but no Alembic migration, no GIN trigram index (explicit requirement), `age_range` modeled as 2 ints vs documented INT4RANGE. |
+| 72g FastAPI skeleton | **PASS (caveats)** | App, CORS, error handler, request-ID middleware, `/api/v1/health` all verified working. structlog not configured (no JSON processors). |
+| op6 Auth system | **FAIL** | Endpoints exist but **registration is broken with current bcrypt versions** (empirically verified). No rate limiting (explicit requirement). No `get_current_user` dependency; no protected endpoint. |
+| omu React skeleton | **FAIL** | No package.json, no router, no Layout/Header, no React Query, no Tailwind, no app entry. 3 orphan page files + stores only. |
+
+**Overall: FAIL** — 3 of 5 tasks are substantially incomplete and the one "working" subsystem (auth) is broken in practice.
+
+---
+
+## 🔴 Critical
+
+1. **Registration/login is functionally broken with current dependency versions (passlib 1.7.4 + bcrypt ≥ 4.1)**
+   - `backend/app/services/auth_service.py:17` (`pwd_context = CryptContext(schemes=["bcrypt"], ...)`)
+   - Empirically verified: with `bcrypt 5.0.0` (latest) installed in a clean venv, `POST /api/v1/auth/register` with a valid 17-char password returns **409 Conflict `"password cannot be longer than 72 bytes, truncate manually if necessary"`** instead of 201. Root cause: passlib 1.7.4's `_load_backend_mixin` fails on `_bcrypt.__about__.__version__` (removed in bcrypt 4.x), falls back to old-bcrypt behavior, and modern bcrypt rejects the call. The `ValueError` from `pwd_context.hash()` at `auth_service.py:35` is misreported as a 409 by the catch-all in `backend/app/api/auth.py:45-48`.
+   - `backend/tests/acceptance/test_auth_flow.py` fails 4 of 6 tests for exactly this reason (run below).
+   - **Fix:** pin `bcrypt<4.1` in requirements, or drop passlib and call `bcrypt` directly (or use `pwdlib`). No `requirements.txt` exists, so nothing pins versions — every fresh install hits this.
+
+2. **No `requirements.txt` / `requirements-dev.txt` in `backend/`** — `backend/Dockerfile:3` (`COPY requirements.txt .`) and `.github/workflows/ci.yml` (backend job) both reference files that do not exist. `docker build` fails at the first COPY; CI fails at `pip install -r requirements.txt`. The app cannot be installed or run reproducibly.
+
+3. **No `package.json` / `package-lock.json` in `frontend/`** — `frontend/Dockerfile:3-4` (`COPY package.json package-lock.json ./`, `npm ci`, `npm run build`), `.github/workflows/ci.yml` frontend job, and the e2e job all reference files that do not exist. The frontend cannot be built, linted, type-checked, or tested. The 8 committed `.tsx`/`.ts` files import `react`, `react-router-dom`, `zustand`, `axios`, `import.meta.env` with zero resolvable dependencies.
+
+4. **Auth-flow security regression vs. the project's own ADR-003** (`docs/DESIGN_DECISIONS.md`): tokens are returned in the response body and stored in `localStorage` (`frontend/src/services/api.ts:9-10`, `frontend/src/stores/authStore.ts:24-27`) instead of httpOnly cookies as the ADR mandates. Any XSS yields full account takeover including the 7-day refresh token. The `withCredentials: true` at `api.ts:4` (comment: "For httpOnly refresh cookies") is a no-op since no cookies are set. Also no `aud`/`iss`/`jti` claims and **no refresh-token rotation/revocation** — a stolen refresh token is usable for 7 days even after the user refreshes (ADR-003: "Refresh rotation adds security" is unimplemented; `backend/app/api/auth.py:65-82` issues new tokens but never invalidates the old one).
+
+## 🟡 Major
+
+5. **No Alembic migration — task 3c4 explicit requirement.** Zero files under any `alembic/` dir; `Base.metadata.create_all` is only exercised in tests. `.github/workflows/cd.yml` "migrate" job runs `alembic upgrade head`, which will fail against a production DB with no tables. Schema changes cannot be versioned.
+
+6. **No GIN trigram index — task 3c4 explicit requirement** ("Include GIN trigram index for book search"). `backend/app/models/book.py:13` indexes `title` as a plain btree, and `backend/app/api/books.py:26-31` searches with `ilike '%term%'`, which cannot use a btree index — full scan per query, contradicting `docs/DESIGN_DECISIONS.md` ADR-002 and `docs/DATA_MODEL.md` (`idx_books_title_trgm`). Also missing the documented composite `idx_questions_book_chapter` on `questions (book_id, chapter)`.
+
+7. **No rate limiting — task op6 explicit requirement** ("Include rate limiting on auth endpoints"). No slowapi/middleware/anything anywhere in `backend/`; `/api/v1/auth/register|login|refresh` are unlimited brute-force targets.
+
+8. **No `get_current_user` dependency / no protected endpoint exercises the JWT.** Token generation/validation exists (`backend/app/services/auth_service.py:56-82`) but nothing consumes it; `backend/app/api/profile.py` is a stub ("requires authentication middleware") and its router is **never registered** — `backend/app/main.py:77-81` only includes `auth`, `books`, `quiz`. So the entire auth system is unverifiable end-to-end and `/api/v1/users/*` 404s.
+
+9. **Quiz flow bugs** (`backend/app/api/quiz.py`) — implemented code, reviewed for correctness:
+   - `start_quiz` mutates and persists shuffled choice positions: `quiz.py:74-77` assigns `c.position = j` on ORM objects, then `db.commit()` at line 82 rewrites the canonical A–D ordering in the DB on every quiz start.
+   - `answer_question` (`quiz.py:95-137`) never validates that `choice_id` belongs to `question_id`, that `question_id` belongs to the attempt's book, or that the question is part of the attempt. Submitting a valid UUID not present in `choices` raises an unhandled `IntegrityError` on commit → 500 via the generic handler. Duplicate answers to the same question are allowed and inflate `answered_count` used as `question_number` (`quiz.py:128-131`).
+   - `complete_quiz` can be called with zero answers (score 0/0), and the accepted `email` field (`backend/app/schemas/quiz.py:33`, `quiz.py:148`) is silently ignored — the PROJECTS.md promise ("ask for email to send results / link attempt to user") is unimplemented. `request: CompleteQuizRequest = CompleteQuizRequest()` at `quiz.py:142` is a mutable-default anti-pattern (use `default=None`).
+   - `start_quiz` always sets `user_id=None` (`quiz.py:71`) and `attempt_number=1` (`quiz.py:79`); the `_get_or_create_user` helper (`quiz.py:34-37`) is dead code. The "exclude already-answered questions" requirement from PROJECTS.md is entirely absent.
+   - No attempt ownership/authorization — any caller can answer/complete any attempt by ID.
+
+10. **Acceptance test suite is failing and insufficient.**
+    - 4 of 6 tests in `backend/tests/acceptance/test_auth_flow.py` fail with current deps (see #1; run evidence below). `.pytest_cache/v/cache/lastfailed` confirms the last recorded run also failed.
+    - Coverage only touches auth. No tests for `/api/v1/health`, request-ID header, error handler, CORS (task 72g), books search, quiz endpoints, or DB model constraints. No negative refresh-token test, no token-expiry test, no is_active test.
+    - Test harness fragility: the SQLite file DB (`test_acceptance.db`, line 17) means the module-level engine import in `app/core/database.py:8` still demands the psycopg2 driver even though PostgreSQL is never used (verified: collection fails with `ModuleNotFoundError: psycopg2` if the driver is absent). Tests should be in-memory SQLite or real PG.
+    - Frontend: `frontend/src/test/` is empty; `frontend/e2e/landing-page.spec.ts` requires a Header with login/signup links that doesn't exist, and a Vite dev server for which there is no config or dependency.
+
+11. **Frontend task omu deliverables missing.** No `index.html`, no `main.tsx`/`App.tsx`, no `<Routes>` config anywhere, no Layout component with Header, no `@tanstack/react-query` provider, no Tailwind/PostCSS config (classes are hard-coded in TSX with nothing to compile them). Only: 3 pages, `authStore` (Zustand ✓ partial), `quizStore`, `api.ts`, `types/index.ts`. Two of the three pages navigate to routes that do not exist: `LandingPage.tsx:10` → `/search`, `QuizPage.tsx:87-89` → `/quiz/:attemptId/complete`; `api.ts:28` redirects to `/login` which also has no route/page. After a page reload `isAuthenticated` is always false (authStore persist `partialize` at `frontend/src/stores/authStore.ts:30-33` stores only `user`), so a logged-in user sees "Please Log In" — the auth flow does not survive refresh.
+
+## 🟢 Minor
+
+12. `backend/app/core/config.py:22-24` — hardcoded dev secrets (`jwt_secret_key`, `admin_api_key`) as defaults; `fly.toml` correctly overrides via secrets, but a `JWT_SECRET_KEY` unset in any deployment silently uses the known default. Add a startup assertion when `environment == "production"`.
+13. `backend/app/models/book.py:4` — dead import `INT4RANGE`; `age_range_lower/upper` (lines 14-15) deviate from `docs/DATA_MODEL.md`'s `age_range INT4RANGE` and from the API docs' `"age_range": [8, 12]` response shape (`docs/API_DESIGN.md`, `docs/DATA_MODEL.md` books table).
+14. `backend/app/main.py:54-60` — generic exception handler returns `error_type` (internal exception class name) to clients; also `add_request_id` uses an 8-char UUID prefix (`main.py:38`) — collision-prone under load; `structlog.get_logger()` is used but structlog is never `configure()`d with processors, so logs are not structured/JSON despite task 72g's "structured logging" requirement.
+15. `backend/app/api/books.py:42` — `import uuid` inside the function body; `BookDetail.question_count` and `.total_questions` (`schemas/book.py:11-12`, `books.py:61-62`) are duplicated fields; `question_count` via `len(b.questions)` with `lazy="selectin"` loads all question rows per book instead of a `count()`.
+16. `backend/app/services/auth_service.py:35-37` — `register` uses `ValueError` for the duplicate-email case; the API layer maps *all* `ValueError`s to 409 (`auth.py:45-48`), which is exactly what turns the bcrypt failure into a misleading 409. Use a typed exception and normalize email to lowercase (case-sensitive duplicate emails are currently possible: `Alice@x.com` ≠ `alice@x.com`).
+17. `backend/app/models/quiz.py:18-22` — `uq_user_book_attempt` unique constraint exists (good) but is dead in practice because `user_id` is always NULL for attempts.
+18. `frontend/src/stores/authStore.ts:20-27` — tokens live in two sources of truth (localStorage keys + Zustand state); `api.ts` reads localStorage directly while the store holds copies — easy to desync.
+19. `fly.toml` declares a `worker` process running `celery -A app.worker` — no `app/worker.py` and no Celery dependency exist.
+20. `backend/tests/acceptance/test_auth_flow.py` — file-based `test_acceptance.db` artifact persists between runs (gitignored, but relies on `drop_all` cleanup; use `tmp_path`/in-memory).
+
+## ✅ Praise
+
+- `backend/app/main.py` is clean and minimal: lifespan logging, CORS, request-ID middleware, health endpoint all verified working at runtime (`{"status":"healthy","version":"1.0.0"}`, `X-Request-ID` header present).
+- `backend/app/services/auth_service.py` has a sensible separation of concerns (register/authenticate/token methods), correct 15-min access / 7-day refresh TTLs, and `verify_token` correctly enforces the `type` claim.
+- ORM models are clean, typed (SQLAlchemy 2.0 `Mapped`/`mapped_column`), and cover all 6 documented tables with sensible relationships and cascades (`question.py` `cascade="all, delete-orphan"`, `quiz.py` unique constraint).
+- `backend/app/api/quiz.py` correctly keeps correct answers server-side (client never sees `is_correct` on choices) and computes `is_correct` on the server.
+- Frontend `api.ts` implements a reasonable single-flight refresh queue (avoiding interceptor recursion by using bare `axios.post` for refresh) — solid pattern, just cannot run yet.
+- Pydantic schemas and TypeScript types mirror each other closely (schema drift risk low).
+
+---
+
+## Empirical Validation (executed during this review, no repo files changed)
+
+- Clean venv install of `fastapi 0.141.1`, `sqlalchemy 2.0.51`, `pydantic 2.13.4`, `passlib 1.7.4`, `bcrypt 5.0.0`, `python-jose 3.5.0`, `structlog 26.1.0`, `psycopg2-binary`, `email-validator`, `pytest 9.1.1`.
+- `pytest tests/ -v` → **4 failed, 2 passed**:
+  - FAILED `test_user_can_register_with_valid_data` (409 not 201)
+  - FAILED `test_duplicate_email_is_rejected` (409 message is bcrypt error, not "already exists")
+  - FAILED `test_user_can_login_with_correct_credentials`
+  - FAILED `test_valid_refresh_token_returns_new_tokens`
+  - PASSED `test_weak_password_is_rejected`, `test_wrong_password_returns_401`
+- Root cause confirmed: `passlib.handlers.bcrypt` traps `AttributeError: module 'bcrypt' has no attribute '__about__'` (bcrypt 5.0.0), then `hash()` raises `ValueError: password cannot be longer than 72 bytes` → surfaced as 409.
+- Uvicorn smoke test: `/api/v1/health` 200, `X-Request-ID` present, unknown path 404, `/api/v1/books` 500 without a reachable PG (no graceful DB-unavailable handling).
+- `git ls-files` confirms the committed tree contains no `requirements*.txt`, `pyproject.toml`, `package.json`, `package-lock.json`, `alembic/*`, `Makefile`, `docker-compose*`, `.pre-commit-config.yaml`, `index.html`, `main.tsx`, `App.tsx`, `vite.config.*`, `tsconfig*`, `tailwind.config.*`, `playwright.config.*` — i.e., the missing infrastructure is not an uncommitted-state artifact.
+
+## Residual Risks
+
+- Without a `requirements.txt`/lockfile, every future install re-rolls dependency versions; the passlib/bcrypt breakage is guaranteed to recur until addressed.
+- If rate limiting and `get_current_user` are added later, the quiz endpoints' lack of attempt ownership will become an authorization hole (any user can answer/complete any attempt).
+- The GIN trigram index and Alembic migration are build-blocking for the "migrate" CD job and for search performance at the promised 10K-book scale.
+- `localStorage` token storage + missing httpOnly cookies means any frontend XSS is a full-account compromise; decide deliberately (per ADR-003) rather than by accident.
+- The e2e spec asserts UI (Header login/signup links, empty search state) that the backend cannot currently serve (no hydrated data, no search results page); expect CI e2e to fail even after scaffolding is added.
+
+## Summary
+
+**Conditional/FAIL.** Tasks 3k7, 3c4, op6, omu are not shippable as-is; 72g is essentially complete but untested. The single most urgent fix is the passlib/bcrypt breakage plus the two missing dependency manifests (`requirements.txt`, `package.json`), without which nothing builds or runs and the acceptance tests fail.
