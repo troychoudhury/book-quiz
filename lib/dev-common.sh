@@ -51,13 +51,132 @@ require_env_file() {
 # ── Dependency checks ───────────────────────────────────────────────
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
+# ── OS detection ────────────────────────────────────────────────────
+os_id() {
+    local id
+    id="$(uname -s)"
+    case "$id" in
+        Darwin) echo "macos" ;;
+        Linux)
+            if [[ -f /etc/os-release ]]; then
+                # shellcheck disable=SC1091
+                source /etc/os-release
+                echo "${ID}"
+            else
+                echo "linux"
+            fi
+            ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+# ── Docker installation ────────────────────────────────────────────
+# Attempts to install Docker when missing. On macOS, downloads Docker
+# Desktop (manual install required). On Linux, installs via the
+# official Docker apt/dnf repository. Always asks for confirmation
+# before running sudo commands.
+install_docker() {
+    local os
+    os="$(os_id)"
+
+    case "$os" in
+        macos)
+            info "macOS detected. Docker Desktop must be installed manually."
+            if command_exists brew; then
+                info "Run: brew install --cask docker"
+                if confirm "Run this now?"; then
+                    brew install --cask docker
+                    info "Docker Desktop installed. Open it from /Applications, complete the setup wizard, then re-run ./dev setup."
+                fi
+            else
+                echo "  Download: https://desktop.docker.com/mac/main/arm64/Docker.dmg"
+                echo "  (Intel Mac: https://desktop.docker.com/mac/main/amd64/Docker.dmg)"
+                echo ""
+                info "Open the .dmg, drag Docker to /Applications, launch it, complete the setup wizard, then re-run ./dev setup."
+            fi
+            ;;
+        ubuntu|debian)
+            info "Ubuntu/Debian detected. Installing Docker Engine via apt..."
+            if ! confirm "Install Docker Engine + Compose plugin? (requires sudo)"; then
+                echo "  Manual install: https://docs.docker.com/engine/install/ubuntu/"
+                return 1
+            fi
+            # Remove old packages
+            for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
+                sudo apt-get remove -y "$pkg" >/dev/null 2>&1 || true
+            done
+            # Add Docker's official GPG key and repo
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ca-certificates curl
+            sudo install -m 0755 -d /etc/apt/keyrings
+            sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+            sudo chmod a+r /etc/apt/keyrings/docker.asc
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            # Add user to docker group (avoids needing sudo for every command)
+            sudo usermod -aG docker "$USER"
+            ok "Docker installed. You may need to log out and back in for group changes to take effect."
+            info "Run: newgrp docker    (to use Docker in this shell without logging out)"
+            ;;
+        fedora|rhel|centos|rocky|almalinux)
+            info "Fedora/RHEL detected. Installing Docker Engine via dnf..."
+            if ! confirm "Install Docker Engine + Compose plugin? (requires sudo)"; then
+                echo "  Manual install: https://docs.docker.com/engine/install/fedora/"
+                return 1
+            fi
+            sudo dnf -y remove docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-selinux docker-engine-selinux docker-engine 2>/dev/null || true
+            sudo dnf -y install dnf-plugins-core
+            sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+            sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            sudo systemctl enable --now docker
+            sudo usermod -aG docker "$USER"
+            ok "Docker installed and daemon started."
+            ;;
+        arch|manjaro)
+            info "Arch Linux detected."
+            if confirm "Install Docker via pacman? (requires sudo)"; then
+                sudo pacman -S --noconfirm docker docker-compose
+                sudo systemctl enable --now docker
+                sudo usermod -aG docker "$USER"
+                ok "Docker installed and daemon started."
+            else
+                echo "  Run: sudo pacman -S docker docker-compose"
+                return 1
+            fi
+            ;;
+        *)
+            warn "Could not detect package manager. Install Docker manually:"
+            echo "  https://docs.docker.com/engine/install/"
+            return 1
+            ;;
+    esac
+
+    # Verify installation
+    if command_exists docker; then
+        if docker info >/dev/null 2>&1; then
+            ok "Docker is running."
+            return 0
+        else
+            warn "Docker installed but daemon is not running."
+            case "$os" in
+                macos)
+                    info "Launch Docker Desktop from /Applications, then re-run ./dev setup." ;;
+                *)
+                    info "Run: sudo systemctl enable --now docker   (then: newgrp docker)" ;;
+            esac
+        fi
+    fi
+    return 1
+}
+
 require_docker() {
     if ! command_exists docker; then
-        err "Docker is required but not installed."
-        case "$(uname -s)" in
-            Darwin)  echo "  Install: https://docs.docker.com/desktop/setup/install/mac-install/" >&2 ;;
-            Linux)   echo "  Install: https://docs.docker.com/engine/install/" >&2 ;;
-        esac
+        warn "Docker is required but not installed."
+        if install_docker; then
+            return 0
+        fi
+        err "Docker installation was not completed. Re-run ./dev setup after installing."
         exit 1
     fi
     if ! docker info >/dev/null 2>&1; then
