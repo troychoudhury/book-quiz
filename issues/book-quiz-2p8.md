@@ -428,7 +428,33 @@ autocomplete: (q: string) =>
 
 ## Plan Review
 
-*Pending architecture-reviewer delegation.*
+**Reviewer**: Architecture Reviewer | **Date**: 2026-08-03
+**Verdict**: **CONDITIONAL PASS** — 1 blocker (B1) must be addressed during implementation.
+
+### Blockers
+
+| # | Issue | Resolution |
+|---|-------|------------|
+| **B1** | Author search is absent from the similarity query. SQL only does `WHERE similarity(title, :query) > 0`. User story US-2 requires matching by author name. | Add `OR similarity(author, :query) > 0` to WHERE clause. Use `GREATEST(similarity(title, :query), similarity(author, :query))` in ORDER BY for composite ranking. |
+
+### Other Findings
+
+| # | Severity | Finding |
+|---|----------|---------|
+| S1 | HIGH | GIN trigram index does NOT accelerate `similarity()` in ORDER BY — forces seq scan. For 1,200 books this is fine (sub-ms). Correct plan's performance claim. |
+| S2 | MEDIUM | No rate limiting on public autocomplete endpoint. Add 30 req/min per IP limit. |
+| I1 | MEDIUM | `db.query(Book).with_entities()` returns Row objects, not ORM instances — `from_attributes` won't work. Use full Book query or manual dict construction. |
+| I2 | MEDIUM | Header variant needs to suppress submit button (Layout header is bare input). Plan didn't explicitly address this. |
+| I3 | LOW | LandingPage hero needs `autoFocus` — SearchBar should accept an `autoFocus` prop. |
+| I4 | LOW | SQLite test gap acknowledged but no CI PostgreSQL coverage. Add mocked unit test as fallback. |
+| R3 | MEDIUM | Use `onMouseDown` on suggestions instead of 150ms blur delay for click race condition. |
+| R4 | MEDIUM | Wrap `useAutocomplete` return in `useMemo` to prevent unnecessary re-renders. |
+| R5 | MEDIUM | Use `window.visualViewport` API instead of `getBoundingClientRect` for mobile keyboard awareness. |
+| R6 | LOW | Add Playwright E2E test for autocomplete flow. |
+
+### Architecture Alignment: ✅ PASS
+
+All changes additive, no existing endpoints modified. Route ordering correctly identified. Component integration points validated against existing Landing and Layout pages. Follows existing patterns for React Query, Tailwind, and FastAPI routers.
 
 ## Implementation Notes
 
