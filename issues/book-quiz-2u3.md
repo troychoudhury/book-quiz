@@ -81,8 +81,44 @@ The `GET /api/v1/books` endpoint in `backend/app/api/books.py` already exists wi
 
 ## Implementation Notes
 
-*Not yet implemented.*
+**Engineer**: tech-lead
+**Date**: 2026-08-03
+
+### Changes Made
+
+1. **Acceptance tests** (`backend/tests/acceptance/test_book_search.py`): 14 tests across 6 test classes covering:
+   - Partial title search (case-insensitive)
+   - Exact ISBN lookup
+   - Empty/whitespace query returns all
+   - Pagination (page 1 vs page 2)
+   - Question count in results
+   - Book detail endpoint (valid, invalid UUID, nonexistent)
+
+2. **Config fix** (`backend/app/core/config.py`): Added `extra="ignore"` to SettingsConfigDict so extra .env fields (POSTGRES_DB, POSTGRES_USER, etc.) don't block test startup.
+
+3. **No API code changes needed**: The existing `backend/app/api/books.py` with ILIKE search + the trigram GIN index from `0001_initial.py` migration already satisfies all requirements. The GIN index accelerates `ILIKE '%term%'` patterns automatically.
+
+4. **Migration check**: `alembic/versions/0001_initial.py` already includes `CREATE EXTENSION IF NOT EXISTS pg_trgm` and `CREATE INDEX idx_books_title_trgm ON books USING gin (title gin_trgm_ops)`.
 
 ## Test Results
 
-*Not yet tested.*
+**Tester**: tech-lead
+**Date**: 2026-08-03
+**Verdict**: ✅ **ALL 14 PASSED**
+
+```
+backend/tests/acceptance/test_book_search.py::TestBookSearchByTitle::test_partial_title_returns_matching_books PASSED
+backend/tests/acceptance/test_book_search.py::TestBookSearchByTitle::test_case_insensitive_search PASSED
+backend/tests/acceptance/test_book_search.py::TestBookSearchByTitle::test_search_with_no_match_returns_empty PASSED
+backend/tests/acceptance/test_book_search.py::TestBookSearchByISBN::test_exact_isbn_returns_correct_book PASSED
+backend/tests/acceptance/test_book_search.py::TestBookSearchByISBN::test_nonnumeric_isbn_returns_empty PASSED
+backend/tests/acceptance/test_book_search.py::TestBookSearchPagination::test_pagination_returns_correct_page PASSED
+backend/tests/acceptance/test_book_search.py::TestBookSearchPagination::test_page_two_returns_different_results PASSED
+backend/tests/acceptance/test_book_search.py::TestBookSearchEmptyQuery::test_empty_query_returns_all_books PASSED
+backend/tests/acceptance/test_book_search.py::TestBookSearchEmptyQuery::test_whitespace_only_query_returns_all PASSED
+backend/tests/acceptance/test_book_search.py::TestBookSearchQuestionCount::test_book_with_questions_shows_count PASSED
+backend/tests/acceptance/test_book_search.py::TestBookSearchQuestionCount::test_book_without_questions_shows_zero PASSED
+backend/tests/acceptance/test_book_search.py::TestBookDetail::test_valid_book_id_returns_full_detail PASSED
+backend/tests/acceptance/test_book_search.py::TestBookDetail::test_invalid_uuid_returns_400 PASSED
+backend/tests/acceptance/test_book_search.py::TestBookDetail::test_nonexistent_book_returns_404 PASSED
+```

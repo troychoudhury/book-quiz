@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     # Rate limiting
     rate_limit_enabled: bool = True
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     def validate_for_environment(self) -> None:
         """Validate that required secrets are present.
