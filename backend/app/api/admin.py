@@ -366,7 +366,7 @@ def _run_generate_questions(task_id: str, book_ids: list[str]) -> None:
     response_model=GenerateQuestionsResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-def trigger_question_generation(
+async def trigger_question_generation(
     request: GenerateQuestionsRequest,
     _: None = Depends(_verify_admin_key),
 ):
@@ -397,7 +397,7 @@ def trigger_question_generation(
     response_model=GenerateQuestionsResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-def trigger_question_generation_all(
+async def trigger_question_generation_all(
     request: GenerateQuestionsAllRequest,
     db: Session = Depends(get_db),
     _: None = Depends(_verify_admin_key),
