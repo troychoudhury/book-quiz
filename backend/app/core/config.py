@@ -31,8 +31,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
 
-    # OpenAI
+    # OpenAI / LLM
     openai_api_key: str = ""
+    openai_base_url: str = ""  # Empty = use OpenAI default; set for DeepSeek etc.
     openai_model: str = "gpt-4o-mini"
 
     # CORS

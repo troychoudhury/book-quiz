@@ -235,8 +235,11 @@ class HydrationService:
         Returns:
             Number of questions stored (0 if no OpenAI key or on error)
         """
+        from app.core.config import get_settings
         from app.models.question import Question, Choice
         from app.services.question_generator import QuestionGenerator
+
+        settings = get_settings()
 
         book = self.db.query(Book).filter(Book.id == book_id).first()
         if not book:
@@ -253,7 +256,11 @@ class HydrationService:
         if book.age_range_lower and book.age_range_upper:
             age_range = f"{book.age_range_lower}-{book.age_range_upper}"
 
-        generator = QuestionGenerator(api_key=self.openai_api_key)
+        generator = QuestionGenerator(
+            api_key=settings.openai_api_key or self.openai_api_key,
+            model=settings.openai_model,
+            base_url=settings.openai_base_url,
+        )
         generated = generator.generate_for_book(
             book_title=book.title,
             author=book.author,

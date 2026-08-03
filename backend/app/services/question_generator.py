@@ -67,16 +67,20 @@ Output format (JSON array):
   }
 ]"""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o-mini"):
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o-mini", base_url: str = ""):
         self.api_key = api_key
         self.model = model
+        self.base_url = base_url or None
         self._client: OpenAI | None = None
 
     @property
     def client(self) -> OpenAI | None:
-        """Lazy OpenAI client — returns None if no API key configured."""
+        """Lazy OpenAI-compatible client — returns None if no API key configured."""
         if self._client is None and self.api_key:
-            self._client = OpenAI(api_key=self.api_key)
+            kwargs = {"api_key": self.api_key}
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+            self._client = OpenAI(**kwargs)
         return self._client
 
     def generate_for_chapter(
