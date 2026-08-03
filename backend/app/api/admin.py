@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal, get_db
+from app.models.book import Book
 from app.services.hydration_service import GRADE_AGE_MAP, HydrationService
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,28 @@ class HydrateAllRequest(BaseModel):
         if self.end_grade < self.start_grade:
             raise ValueError("end_grade must be >= start_grade")
         return self
+
+
+class GenerateQuestionsRequest(BaseModel):
+    book_id: str = Field(..., description="UUID of the book")
+
+
+class GenerateQuestionsAllRequest(BaseModel):
+    max_books: int = Field(0, ge=0, le=2000, description="Max books to process (0 = all)")
+
+
+class GenerateQuestionsResponse(BaseModel):
+    task_id: str
+    status: str
+    message: str
+
+
+class GenerateQuestionsStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    books_processed: int = 0
+    questions_generated: int = 0
+    errors: list[str] = []
 
 
 class HydrateResponse(BaseModel):
@@ -298,6 +321,154 @@ def get_hydrate_all_status(
         end_grade=task["end_grade"],
         books_per_grade=task["books_per_grade"],
         grades=grades,
+        books_processed=task.get("books_processed", 0),
+        questions_generated=task.get("questions_generated", 0),
+        errors=task.get("errors", []),
+    )
+
+
+# ── Question Generation Endpoints ────────────────────────────────────────────
+
+
+def _run_generate_questions(task_id: str, book_ids: list[str]) -> None:
+    """Background worker: generate questions for a list of books."""
+    db = SessionLocal()
+    try:
+        service = HydrationService(db, openai_api_key=settings.openai_api_key)
+        total_questions = 0
+        errors: list[str] = []
+
+        for i, book_id_str in enumerate(book_ids):
+            try:
+                bid = uuid.UUID(book_id_str)
+                q_count = service.generate_questions_for_book(bid)
+                total_questions += q_count
+                _tasks[task_id]["books_processed"] = i + 1
+                _tasks[task_id]["questions_generated"] = total_questions
+            except ValueError:
+                errors.append(f"Invalid book ID: {book_id_str}")
+            except Exception as e:
+                errors.append(f"Book {book_id_str}: {e}")
+                logger.exception(f"Question generation failed for book {book_id_str}")
+
+        _tasks[task_id]["errors"] = errors
+        _tasks[task_id]["status"] = "completed"
+    except Exception as e:
+        _tasks[task_id]["status"] = "failed"
+        _tasks[task_id]["errors"] = [str(e)]
+        logger.exception(f"Question generation task {task_id} failed")
+    finally:
+        db.close()
+
+
+@router.post(
+    "/generate-questions",
+    response_model=GenerateQuestionsResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def trigger_question_generation(
+    request: GenerateQuestionsRequest,
+    _: None = Depends(_verify_admin_key),
+):
+    """Generate quiz questions for a single book."""
+    try:
+        uuid.UUID(request.book_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid book ID.")
+
+    task_id = str(uuid.uuid4())
+    _tasks[task_id] = {
+        "task_id": task_id,
+        "status": "processing",
+        "books_processed": 0,
+        "questions_generated": 0,
+        "errors": [],
+    }
+
+    asyncio.create_task(asyncio.to_thread(_run_generate_questions, task_id, [request.book_id]))
+
+    return GenerateQuestionsResponse(
+        task_id=task_id, status="processing", message="Question generation started"
+    )
+
+
+@router.post(
+    "/generate-questions-all",
+    response_model=GenerateQuestionsResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def trigger_question_generation_all(
+    request: GenerateQuestionsAllRequest,
+    db: Session = Depends(get_db),
+    _: None = Depends(_verify_admin_key),
+):
+    """Generate quiz questions for all books that don't have any yet."""
+    # Concurrency guard
+    for t in _tasks.values():
+        if t.get("status") == "processing" and t.get("type") in (
+            "generate_questions",
+            "generate_questions_all",
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A question generation job is already running.",
+            )
+
+    from app.models.question import Question
+
+    all_book_ids = [row[0] for row in db.query(Book.id).all()]
+    books_with_q = {row[0] for row in db.query(Question.book_id).distinct().all()}
+    pending = [str(bid) for bid in all_book_ids if bid not in books_with_q]
+
+    if request.max_books > 0:
+        pending = pending[: request.max_books]
+
+    if not pending:
+        return GenerateQuestionsResponse(
+            task_id="none", status="completed", message="All books already have questions."
+        )
+
+    task_id = str(uuid.uuid4())
+    _tasks[task_id] = {
+        "task_id": task_id,
+        "type": "generate_questions_all",
+        "status": "processing",
+        "books_processed": 0,
+        "questions_generated": 0,
+        "total_books": len(pending),
+        "errors": [],
+    }
+
+    asyncio.create_task(asyncio.to_thread(_run_generate_questions, task_id, pending))
+
+    return GenerateQuestionsResponse(
+        task_id=task_id,
+        status="processing",
+        message=f"Question generation started for {len(pending)} books",
+    )
+
+
+@router.get(
+    "/generate-questions/{task_id}/status",
+    response_model=GenerateQuestionsStatusResponse,
+)
+def get_generate_questions_status(
+    task_id: str,
+    _: None = Depends(_verify_admin_key),
+):
+    """Get the status of a question generation job."""
+    try:
+        uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid task ID.")
+
+    task = _tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found.")
+
+    return GenerateQuestionsStatusResponse(
+        task_id=task["task_id"],
+        status=task["status"],
         books_processed=task.get("books_processed", 0),
         questions_generated=task.get("questions_generated", 0),
         errors=task.get("errors", []),

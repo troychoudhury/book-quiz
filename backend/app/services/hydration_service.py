@@ -223,16 +223,71 @@ class HydrationService:
         return book
 
     def generate_questions_for_book(self, book_id: UUID) -> int:
-        """Generate AI-powered questions for each chapter of a book.
+        """Generate AI-powered quiz questions for a book and store them.
 
-        Calls the QuestionGenerator service to produce questions via OpenAI.
-        Currently a stub — requires real chapter data from external source.
+        Uses the QuestionGenerator to produce 10 questions via OpenAI,
+        then stores them + choices in the database. Works without
+        explicit chapter data — the AI uses its knowledge of the book.
 
         Args:
             book_id: UUID of the book
 
         Returns:
-            Number of questions generated (0 if no OpenAI key)
+            Number of questions stored (0 if no OpenAI key or on error)
         """
-        logger.info(f"Question generation for book {book_id} — requires OpenAI key")
-        return 0
+        from app.models.question import Question, Choice
+        from app.services.question_generator import QuestionGenerator
+
+        book = self.db.query(Book).filter(Book.id == book_id).first()
+        if not book:
+            logger.error(f"Book {book_id} not found")
+            return 0
+
+        # Skip if already has questions
+        existing = self.db.query(Question).filter(Question.book_id == book_id).count()
+        if existing > 0:
+            logger.info(f"Book {book_id} already has {existing} questions — skipping")
+            return existing
+
+        age_range = ""
+        if book.age_range_lower and book.age_range_upper:
+            age_range = f"{book.age_range_lower}-{book.age_range_upper}"
+
+        generator = QuestionGenerator(api_key=self.openai_api_key)
+        generated = generator.generate_for_book(
+            book_title=book.title,
+            author=book.author,
+            age_range=age_range,
+        )
+
+        if not generated:
+            return 0
+
+        stored = 0
+        for gq in generated:
+            question = Question(
+                id=uuid4(),
+                book_id=book_id,
+                chapter=gq.chapter,
+                chapter_title=gq.chapter_title or None,
+                question_text=gq.question_text,
+                question_type=gq.question_type,
+                difficulty=gq.difficulty,
+            )
+            self.db.add(question)
+            self.db.flush()
+
+            for i, gc in enumerate(gq.choices):
+                choice = Choice(
+                    id=uuid4(),
+                    question_id=question.id,
+                    choice_text=gc.text,
+                    is_correct=gc.is_correct,
+                    position=i,
+                )
+                self.db.add(choice)
+            stored += 1
+
+        self.db.commit()
+        logger.info(f"Stored {stored} questions for book {book_id} ('{book.title}')")
+        return stored

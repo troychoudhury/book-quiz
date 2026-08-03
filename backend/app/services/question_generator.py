@@ -180,3 +180,89 @@ Generate 10 multiple-choice questions testing a reader's:
 Include at least one 'all of the above' or 'none of the above' choice variant.
 Vary difficulty: 3 easy, 4 medium, 3 hard questions.
 """
+
+    def generate_for_book(
+        self,
+        book_title: str,
+        author: str,
+        age_range: str = "",
+    ) -> list[GeneratedQuestion]:
+        """Generate 10 general multiple-choice questions for a book.
+
+        Works without explicit chapter data — the AI has broad knowledge of
+        published books and can generate reasonable questions from title +
+        author alone. Questions cover themes, characters, plot, and morals.
+        """
+        if not self.client:
+            logger.warning("No OpenAI API key configured — skipping question generation")
+            return []
+
+        prompt = self._build_book_prompt(book_title, author, age_range)
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=4096,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            if not content:
+                logger.error("Empty response from OpenAI")
+                return []
+
+            data = json.loads(content)
+            questions_raw = data if isinstance(data, list) else data.get("questions", [])
+
+            result: list[GeneratedQuestion] = []
+            for q in questions_raw:
+                choices = [
+                    GeneratedChoice(text=c["text"], is_correct=c["is_correct"])
+                    for c in q.get("choices", [])
+                ]
+                result.append(
+                    GeneratedQuestion(
+                        question_text=q["question_text"],
+                        question_type=q.get("question_type", "fact"),
+                        difficulty=q.get("difficulty", "medium"),
+                        choices=choices,
+                        chapter=0,
+                        chapter_title="",
+                    )
+                )
+
+            logger.info(f"Generated {len(result)} questions for '{book_title}'")
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse OpenAI response: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"OpenAI API call failed: {e}")
+            return []
+
+    def _build_book_prompt(
+        self,
+        book_title: str,
+        author: str,
+        age_range: str,
+    ) -> str:
+        """Build a prompt for book-level question generation (no chapter data)."""
+        age_hint = f" Target age range: {age_range}." if age_range else ""
+        return f"""Book: "{book_title}" by {author}.{age_hint}
+
+Generate 10 multiple-choice questions testing a reader's understanding of this book:
+- Key plot events and facts
+- Main themes and messages
+- Character motivations and relationships
+- Moral lessons and outcomes
+
+The questions should be answerable by someone who has read the book.
+Include at least one 'all of the above' or 'none of the above' variant.
+Vary difficulty: 3 easy, 4 medium, 3 hard.
+"""
