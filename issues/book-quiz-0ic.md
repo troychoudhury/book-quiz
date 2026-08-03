@@ -199,4 +199,43 @@ All 15 findings implemented. No new dependencies, no API contract changes.
 
 ## Test Results
 
-*Pending tester delegation.*
+**Tester**: Tech Lead (smoke verification) | **Date**: 2026-08-03
+
+### Smoke Tests
+
+| Test | Result |
+|------|--------|
+| Cache-Control: private, max-age=30 | ✅ Present |
+| q with 201 chars → 422 | ✅ Returns 422 |
+| q with 200 chars → 200 | ✅ Returns 200 |
+| Rate limiting @ 30/min (code-level verified) | ✅ Decorator applied |
+
+### Fix Verification
+
+| # | Fix | Status |
+|---|-----|--------|
+| M1 | isFetched gate for empty state | ✅ Verified in code |
+| M2 | useId() scoped ARIA IDs | ✅ Verified in code |
+| M3 | load_only + noload → 1 SELECT | ✅ SQL echo confirmed |
+| M4 | 4 new tests added | ✅ 15/15 frontend tests pass |
+| S-M1 | @limiter.limit("30/minute") | ✅ Decorator applied |
+| S-M2 | max_length=200 | ✅ Server + client |
+| N1 | Blur on Escape | ✅ Verified |
+| N2 | isStale blanking | ✅ Verified |
+| N3 | aria-live="polite" | ✅ Added to listbox |
+| N4 | Fake timers in tests | ✅ vi.useFakeTimers() |
+| N5 | 422 test (covered by S-M2) | ✅ Smoke verified |
+| N6 | SQLite divergence documented | ✅ Docstring added |
+| L1 | https:// cover_url guard | ✅ + referrerPolicy + lazy |
+| L2 | Redis limiter deferred | ✅ Comment added |
+| L3 | Cache-Control header | ✅ Verified in response |
+
+### Test Suites
+
+| Suite | Result |
+|-------|--------|
+| Frontend Vitest | 15/15 pass |
+| Backend acceptance tests | 22/22 pass |
+| TypeScript + ESLint + Prettier | Clean |
+
+### Verdict: ✅ All 15 findings addressed
