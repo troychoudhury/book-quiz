@@ -233,6 +233,35 @@ psql -c "SELECT age_range_lower, count(*) FROM books GROUP BY age_range_lower OR
 - [DESIGN_DECISIONS.md](../docs/DESIGN_DECISIONS.md) — ADR-004 (Celery background tasks), ADR-002 (PostgreSQL decisions)
 - [ARCHITECTURE.md](../docs/ARCHITECTURE.md) — System component diagram
 
+## Plan Review
+
+**Reviewer**: Architecture Reviewer  
+**Date**: 2026-08-03  
+**Verdict**: **CONDITIONAL PASS** — 2 blockers (R1, R2) must be resolved before implementation.
+
+### Blockers
+
+| # | Issue | Resolution |
+|---|-------|------------|
+| **R1** | Unverified OpenLibrary subject slugs — `easy_readers`, `readers_elementary`, `chapter_books`, `middle_school_fiction`, `coming_of_age`, `dystopian_fiction` may not be valid OpenLibrary subjects. Must pre-verify each subject before implementation. | Verify all subjects with curl; replace any that return 0 results. |
+| **R2** | Execution model mismatch — plan shows 202 async pattern but existing `POST /admin/hydrate` runs synchronously. A 12-grade hydration holds the HTTP connection for 30-60s, risking proxy timeouts. | Use `asyncio.create_task` + thread executor to run hydration in background, returning 202 immediately. |
+
+### Other Findings
+
+| # | Severity | Finding |
+|---|----------|---------|
+| S1 | MEDIUM | `_get_existing_isbns()` does full-table ISBN scan per grade. Acceptable at <10K books per ADR-002. Add comment noting scale limit. |
+| S2 | LOW | In-memory `_tasks` dict lost on restart. Acceptable for one-time load. Document limitation. |
+| S3 | LOW | No concurrency guard — two simultaneous hydrate-all calls would race. Add 409 Conflict if a task is already processing. |
+| D1 | INFO | `fetch_books_for_grade` convenience method would be dead code. Defer it unless hydrate-all endpoint uses it. |
+| D2 | INFO | Existing `POST /admin/hydrate` behavior changes silently (now iterates multiple subjects). This is a desirable improvement but should be documented. |
+| D3 | INFO | Data flow diagram shows `ON CONFLICT (isbn) SKIP` but actual code uses in-memory ISBN dedup. Diagram should reflect reality. |
+| T1 | MEDIUM | No test strategy in plan. Per ADR-005, acceptance tests needed for hydrate-all endpoint. |
+
+### Architecture Alignment: ✅ PASS
+
+All changes stay within existing module boundaries (`hydration_service.py`, `admin.py`). Aligns with DATA_MODEL.md (actual schema uses Integer columns for age_range), ADR-004 (Celery deferred), and existing admin API conventions.
+
 ## Implementation Notes
 
 *Pending engineer delegation.*
