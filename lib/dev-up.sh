@@ -10,7 +10,7 @@
 wait_for_db() {
     info "Waiting for database to be healthy..."
     local attempts=0
-    until docker exec bookquiz-db pg_isready -U "${POSTGRES_USER:-bookquiz}" -d "${POSTGRES_DB:-bookquiz}" >/dev/null 2>&1; do
+    until docker_run exec bookquiz-db pg_isready -U "${POSTGRES_USER:-bookquiz}" -d "${POSTGRES_DB:-bookquiz}" >/dev/null 2>&1; do
         attempts=$((attempts + 1))
         if [[ $attempts -ge 30 ]]; then
             err "Database not ready after 60s. Check: docker compose ps"
@@ -24,7 +24,7 @@ wait_for_db() {
 wait_for_redis() {
     info "Waiting for redis to be healthy..."
     local attempts=0
-    until docker exec bookquiz-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-bookquiz_dev}" ping 2>/dev/null | grep -q PONG; do
+    until docker_run exec bookquiz-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-bookquiz_dev}" ping 2>/dev/null | grep -q PONG; do
         attempts=$((attempts + 1))
         if [[ $attempts -ge 20 ]]; then
             err "Redis not ready after 40s. Check: docker compose ps"

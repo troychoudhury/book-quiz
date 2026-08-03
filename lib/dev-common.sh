@@ -171,9 +171,15 @@ install_docker() {
 }
 
 # Choose the right way to invoke Docker: direct, sg (fresh group), or sudo.
+# When DOCKER_HOST is set but the socket is dead, try the default socket
+# (common on systems where Docker and Podman are both installed).
 _docker_cmd() {
     if docker info >/dev/null 2>&1; then
         echo "docker"
+    elif [[ -n "${DOCKER_HOST:-}" ]] && DOCKER_HOST="" docker info >/dev/null 2>&1; then
+        # DOCKER_HOST points to a dead socket; fall back to default daemon.
+        warn "DOCKER_HOST (${DOCKER_HOST}) is not reachable — using default Docker socket."
+        echo "env DOCKER_HOST='' docker"
     elif command_exists sg && sg docker -c "docker info" >/dev/null 2>&1; then
         echo "sg docker -c docker"
     elif sudo docker info >/dev/null 2>&1; then
@@ -224,14 +230,20 @@ require_docker() {
             exit 1
         fi
     fi
-    # Check if Docker works (tries direct → sg → sudo)
+    # Check if Docker works (tries direct → unset DOCKER_HOST → sg → sudo)
     if ! docker info >/dev/null 2>&1; then
-        if command_exists sg && sg docker -c "docker info" >/dev/null 2>&1; then
+        if [[ -n "${DOCKER_HOST:-}" ]] && DOCKER_HOST="" docker info >/dev/null 2>&1; then
+            warn "DOCKER_HOST (${DOCKER_HOST}) is not reachable — using default Docker socket."
+            return 0
+        elif command_exists sg && sg docker -c "docker info" >/dev/null 2>&1; then
             return 0
         elif sudo docker info >/dev/null 2>&1; then
             return 0
         fi
         err "Docker daemon is not running or not accessible."
+        if [[ -n "${DOCKER_HOST:-}" ]]; then
+            info "DOCKER_HOST=${DOCKER_HOST} is set but unreachable. Try: unset DOCKER_HOST"
+        fi
         info "Try: sudo systemctl start docker"
         info "Then: newgrp docker   (or log out and back in)"
         exit 1
