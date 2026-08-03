@@ -1,0 +1,7 @@
+# Backend image — do not ship host venv, caches, tests, or local DBs.
+.venv
+__pycache__
+.pytest_cache
+*.db
+tests/
+.env

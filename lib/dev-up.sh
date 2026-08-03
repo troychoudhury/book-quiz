@@ -24,7 +24,7 @@ wait_for_db() {
 wait_for_redis() {
     info "Waiting for redis to be healthy..."
     local attempts=0
-    until docker exec bookquiz-redis redis-cli ping 2>/dev/null | grep -q PONG; do
+    until docker exec bookquiz-redis redis-cli --no-auth-warning -a "${REDIS_PASSWORD:-bookquiz_dev}" ping 2>/dev/null | grep -q PONG; do
         attempts=$((attempts + 1))
         if [[ $attempts -ge 20 ]]; then
             err "Redis not ready after 40s. Check: docker compose ps"
@@ -73,23 +73,23 @@ up_native() {
     start_infra
     run_migrations
 
-    # Port conflict pre-checks
+    # Port conflict pre-checks — fail fast so we don't leave a half-up stack.
     for p in "${BACKEND_PORT:-8000}" "${FRONTEND_PORT:-5173}"; do
         if ! port_free "$p"; then
-            warn "Port $p in use. Override with BACKEND_PORT/FRONTEND_PORT in .env, or ./dev down."
+            err "Port $p is in use. Free it, or override with BACKEND_PORT/FRONTEND_PORT in .env."
+            exit 1
         fi
     done
 
     step "Starting Celery worker"
     local venv_bin="${DEV_ROOT}/backend/.venv/bin"
-    start_bg "celery" "$venv_bin/celery" -A app.worker worker --loglevel=info --concurrency=2
-    (cd "${DEV_ROOT}/backend" && "$venv_bin/celery" -A app.worker status >/dev/null 2>&1 || true)
+    start_bg "celery" --cwd "${DEV_ROOT}/backend" "$venv_bin/celery" -A app.worker worker --loglevel=info --concurrency=2
 
     step "Starting backend (uvicorn --reload)"
-    start_bg "backend" "$venv_bin/uvicorn" app.main:app --host 0.0.0.0 --port "${BACKEND_PORT:-8000}" --reload
+    start_bg "backend" --cwd "${DEV_ROOT}/backend" "$venv_bin/uvicorn" app.main:app --host 0.0.0.0 --port "${BACKEND_PORT:-8000}" --reload
 
     step "Starting frontend (vite dev server)"
-    start_bg "frontend" "${DEV_ROOT}/frontend/node_modules/.bin/vite" --host 0.0.0.0 --port "${FRONTEND_PORT:-5173}"
+    start_bg "frontend" --cwd "${DEV_ROOT}/frontend" "${DEV_ROOT}/frontend/node_modules/.bin/vite" --host 0.0.0.0 --port "${FRONTEND_PORT:-5173}"
 
     sleep 2
     echo ""

@@ -664,3 +664,37 @@ The codebase is otherwise well-structured from a security perspective — the sh
 - `dev test --e2e` (Playwright) not run — requires a running stack, which the native path cannot currently provide.
 - `.env.example` omits `OPENAI_MODEL` / `CORS_ORIGINS`, but both have defaults in `app/core/config.py` — no action needed.
 - Prior Security Audit's "signal trap works correctly" conclusion is superseded by CRIT-1.
+
+## Implementation Notes (fix pass — review findings)
+
+**Date**: 2026-08-03 | **Agent**: engineer (delegated fix worker)
+
+### Critical fixes
+1. **EXIT trap no longer kills stack** (`lib/dev-common.sh`)
+   - Trap split: `INT TERM` → `cleanup_all` (kill processes); `EXIT` → `cleanup_stale_pidfiles` (removes ONLY pid files whose process is already dead).
+   - Live pid files are preserved so `dev down` can still stop the stack.
+   - Empirically verified: tracked process survives normal script exit.
+
+2. **Wrong working directory** (`lib/dev-up.sh`)
+   - `start_bg` gained optional `--cwd DIR`; uvicorn/celery now run with `--cwd backend/`, vite with `--cwd frontend/`.
+   - Verified: process cwd == backend/ when `--cwd` passed; default remains DEV_ROOT.
+
+3. **Missing .dockerignore** — created:
+   - root `.dockerignore` (excludes .git, .beads, .pi-subagents, .logs, node_modules, .venv, __pycache__, *.db, .env)
+   - `backend/.dockerignore` (excludes .venv, caches, tests/, *.db, .env)
+   - `frontend/.dockerignore` (excludes node_modules, dist, .env)
+
+### High security fixes
+4. **Ports bound to 127.0.0.1** (`docker-compose.yml`) — db and redis no longer exposed on the LAN.
+5. **DB password auto-generated** — `dev setup` now generates `DB_PASSWORD=$(openssl rand -hex 16)`; compose uses `${DB_PASSWORD:-bookquiz_dev}`; `.env.example` updated; `setup_migrations` fallback URL and `cmd_setup` re-load of `.env` keep first-run migrations working.
+6. **Redis requirepass** — `command: redis-server --requirepass ${REDIS_PASSWORD:-bookquiz_dev}`; healthcheck and `wait_for_redis` authenticate; `REDIS_URL` in compose (docker mode) and `.env.example` include the password.
+
+### Quick wins
+7. **Process-group kill** — `kill_tracked` now signals `-$pid` (process group) with fallback to individual PID.
+8. **Port conflict = hard fail** — `dev up --native` exits 1 instead of warning when backend/frontend ports are occupied.
+
+### Verification
+- `bash -n` clean on `dev` + all 7 lib modules.
+- `docker compose` YAML parses (PyYAML) with all substitutions verified.
+- Functional tests (harness): EXIT trap preserves live processes + pid files; INT/TERM trap still kills; `--cwd` honored; stale pidfile cleanup; secret substitution in .env generation.
+- Not executed (no Docker on this machine): full `./dev up --native` boot, `./dev up --docker`, `./dev build`.

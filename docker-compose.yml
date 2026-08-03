@@ -18,9 +18,9 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-bookquiz}
       POSTGRES_USER: ${POSTGRES_USER:-bookquiz}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bookquiz_dev}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-bookquiz_dev}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -36,12 +36,13 @@ services:
   redis:
     image: redis:7-alpine
     container_name: bookquiz-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-bookquiz_dev}
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redisdata:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a ${REDIS_PASSWORD:-bookquiz_dev} ping | grep PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -56,8 +57,8 @@ services:
     container_name: bookquiz-backend
     environment:
       # In docker mode the DB/Redis hostnames resolve on the compose network.
-      DATABASE_URL: postgresql://${POSTGRES_USER:-bookquiz}:${POSTGRES_PASSWORD:-bookquiz_dev}@db:5432/${POSTGRES_DB:-bookquiz}
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER:-bookquiz}:${DB_PASSWORD:-bookquiz_dev}@db:5432/${POSTGRES_DB:-bookquiz}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-bookquiz_dev}@redis:6379/0
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-only-change-me}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ADMIN_API_KEY: ${ADMIN_API_KEY:-admin-dev-key}
@@ -88,8 +89,8 @@ services:
     container_name: bookquiz-celery
     command: celery -A app.worker worker --loglevel=info --concurrency=2
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-bookquiz}:${POSTGRES_PASSWORD:-bookquiz_dev}@db:5432/${POSTGRES_DB:-bookquiz}
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER:-bookquiz}:${DB_PASSWORD:-bookquiz_dev}@db:5432/${POSTGRES_DB:-bookquiz}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-bookquiz_dev}@redis:6379/0
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ENVIRONMENT: development
     depends_on:

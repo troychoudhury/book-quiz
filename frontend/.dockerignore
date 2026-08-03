@@ -1,0 +1,5 @@
+# Frontend image — host node_modules (glibc binaries) would break the
+# alpine/musl build; dist and env files are rebuilt in-container.
+node_modules
+dist
+.env

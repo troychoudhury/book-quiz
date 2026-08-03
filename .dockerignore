@@ -1,0 +1,10 @@
+# Root build context (Fly.io production image) — keep the context lean.
+.git
+.beads
+.pi-subagents
+.logs
+node_modules
+.venv
+__pycache__
+*.db
+.env

@@ -8,12 +8,16 @@
 
 cmd_generate_secrets() {
     require_openssl
-    local jwt admin
+    local jwt admin db_pass redis_pass
     jwt="$(openssl rand -hex 32)"
     admin="$(openssl rand -hex 16)"
+    db_pass="$(openssl rand -hex 16)"
+    redis_pass="$(openssl rand -hex 16)"
     ok "Generated secrets:"
     echo "  JWT_SECRET_KEY=${jwt}"
     echo "  ADMIN_API_KEY=${admin}"
+    echo "  DB_PASSWORD=${db_pass}"
+    echo "  REDIS_PASSWORD=${redis_pass}"
     echo ""
     info "To apply: set these in ${ENV_FILE} (or run ./dev setup on a fresh .env)"
 }
@@ -29,9 +33,21 @@ create_env_file() {
     fi
     require_openssl
     info "Creating .env from .env.example with generated secrets..."
+    # Generate unique credentials so `dev up` boots with strong secrets
+    # (JWT signing, admin API key, DB password, Redis password).
+    local db_pass redis_pass jwt admin
+    db_pass="$(openssl rand -hex 16)"
+    redis_pass="$(openssl rand -hex 16)"
+    jwt="$(openssl rand -hex 32)"
+    admin="$(openssl rand -hex 16)"
     # Substitute real secrets so `dev up` boots with unique credentials.
-    sed -e "s/^JWT_SECRET_KEY=.*/JWT_SECRET_KEY=$(openssl rand -hex 32)/" \
-        -e "s/^ADMIN_API_KEY=.*/ADMIN_API_KEY=$(openssl rand -hex 16)/" \
+    sed -e "s/^JWT_SECRET_KEY=.*/JWT_SECRET_KEY=${jwt}/" \
+        -e "s/^ADMIN_API_KEY=.*/ADMIN_API_KEY=${admin}/" \
+        -e "s/^DB_PASSWORD=.*/DB_PASSWORD=${db_pass}/" \
+        -e "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=${db_pass}/" \
+        -e "s|^DATABASE_URL=.*|DATABASE_URL=postgresql://${POSTGRES_USER:-bookquiz}:${db_pass}@localhost:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-bookquiz}|" \
+        -e "s/^REDIS_PASSWORD=.*/REDIS_PASSWORD=${redis_pass}/" \
+        -e "s|^REDIS_URL=.*|REDIS_URL=redis://:${redis_pass}@localhost:${REDIS_PORT:-6379}/0|" \
         "${DEV_ROOT}/.env.example" > "$ENV_FILE"
     chmod 600 "$ENV_FILE"
     ok ".env created with generated secrets."
@@ -115,7 +131,9 @@ setup_migrations() {
 
     local alembic_bin="${DEV_ROOT}/backend/.venv/bin/alembic"
     if [[ -x "$alembic_bin" ]]; then
-        (cd "${DEV_ROOT}/backend" && DATABASE_URL="${DATABASE_URL:-postgresql://bookquiz:bookquiz_dev@localhost:5432/bookquiz}" "$alembic_bin" upgrade head)
+        local default_db_url
+        default_db_url="postgresql://${POSTGRES_USER:-bookquiz}:${DB_PASSWORD:-bookquiz_dev}@localhost:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-bookquiz}"
+        (cd "${DEV_ROOT}/backend" && DATABASE_URL="${DATABASE_URL:-$default_db_url}" "$alembic_bin" upgrade head)
         ok "Migrations applied."
     else
         warn "alembic not installed in venv — skipping migrations (run ./dev up to apply)."
@@ -126,6 +144,7 @@ cmd_setup() {
     info "Book Quiz — dev setup (idempotent)"
     load_env
     create_env_file
+    load_env  # re-load so freshly generated secrets (.env) are available
     setup_backend
     setup_frontend
     setup_precommit

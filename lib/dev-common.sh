@@ -116,15 +116,25 @@ port_free() {
 
 # ── PID management ──────────────────────────────────────────────────
 # Background processes started by `dev up --native` are tracked in
-# $PID_DIR so `dev down` and the EXIT trap can kill them reliably.
+# $PID_DIR so `dev down` and the INT/TERM trap can kill them reliably.
+# Optional `--cwd DIR` makes the process run from a specific directory
+# (uvicorn/celery must run from backend/, vite from frontend/).
 start_bg() {
     local name="$1"; shift
+    local cwd="${DEV_ROOT}"
+    if [[ "${1:-}" == "--cwd" ]]; then
+        cwd="$2"
+        shift 2
+    fi
     local logfile="${DEV_ROOT}/.logs/${name}.log"
     mkdir -p "$(dirname "$logfile")"
     info "Starting $name → ${logfile}"
-    # shellcheck disable=SC2068
-    nohup "$@" >"$logfile" 2>&1 &
-    echo $! > "${PID_DIR}/${name}.pid"
+    (
+        cd "$cwd" || { err "Cannot cd to $cwd for $name"; exit 1; }
+        # shellcheck disable=SC2068
+        nohup "$@" >"$logfile" 2>&1 &
+        echo $! > "${PID_DIR}/${name}.pid"
+    )
 }
 
 kill_tracked() {
@@ -135,9 +145,12 @@ kill_tracked() {
         pid="$(cat "$pidfile")"
         if kill -0 "$pid" 2>/dev/null; then
             info "Stopping $name (pid $pid)"
-            kill "$pid" 2>/dev/null || true
+            # Signal the whole process group first (covers children such as
+            # uvicorn --reload subprocesses / celery pool workers). Fall back
+            # to the individual PID when the process is not a group leader.
+            kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
             sleep 1
-            kill -9 "$pid" 2>/dev/null || true
+            kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
         fi
         rm -f "$pidfile"
     fi
@@ -156,8 +169,25 @@ cleanup_all() {
     return 0
 }
 
-# Trap: always clean up tracked background processes on exit/interrupt.
-trap cleanup_all EXIT INT TERM
+# EXIT trap: remove only STALE PID files (processes already dead). Never
+# kill processes on normal exit — otherwise `dev up` would tear down the
+# stack it just started. Live PID files stay so `dev down` can stop them.
+cleanup_stale_pidfiles() {
+    local pidfile pid
+    for pidfile in "${PID_DIR}"/*.pid; do
+        [[ -e "$pidfile" ]] || continue
+        pid="$(cat "$pidfile" 2>/dev/null || echo 0)"
+        if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$pidfile"
+        fi
+    done
+    return 0
+}
+
+# INT/TERM: kill tracked background processes (then EXIT removes PID files).
+trap cleanup_all INT TERM
+# EXIT: only clean up stale PID files — never kill running processes.
+trap cleanup_stale_pidfiles EXIT
 
 # ── Misc helpers ────────────────────────────────────────────────────
 compose() {
