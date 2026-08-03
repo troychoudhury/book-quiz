@@ -27,9 +27,11 @@ class BookProgress(BaseModel):
     book_id: str
     title: str
     author: str
+    cover_url: str | None = None
     attempts: list[AttemptSummary]
     best_score: int = 0
     total_questions_answered: int = 0
+    remaining_questions: int = 0
 
 
 class ProfileResponse(BaseModel):
@@ -65,6 +67,7 @@ def get_profile(
         book = db.query(Book).filter(Book.id == book_id).first()
         if not book:
             continue
+        total_qs = len(book.questions) if book.questions else 0
         attempts_summary = [
             AttemptSummary(
                 attempt_number=a.attempt_number,
@@ -84,9 +87,11 @@ def get_profile(
                 book_id=str(book.id),
                 title=book.title,
                 author=book.author,
+                cover_url=book.cover_url,
                 attempts=attempts_summary,
                 best_score=best,
                 total_questions_answered=answered,
+                remaining_questions=max(0, total_qs - answered),
             )
         )
 
@@ -127,10 +132,16 @@ def get_book_progress(
         .all()
     )
 
+    total_answered = sum(a.total_questions for a in attempts)
+    total_qs = len(book.questions) if book.questions else 0
+    remaining = max(0, total_qs - total_answered)
+
     return {
         "book_id": str(book.id),
         "title": book.title,
         "author": book.author,
+        "cover_url": book.cover_url,
+        "attempts_completed": len(attempts),
         "attempts": [
             {
                 "attempt_number": a.attempt_number,
@@ -140,5 +151,8 @@ def get_book_progress(
             }
             for a in attempts
         ],
-        "total_questions_answered": sum(a.total_questions for a in attempts),
+        "total_questions": total_qs,
+        "total_questions_answered": total_answered,
+        "remaining_questions": remaining,
+        "can_retake": remaining > 0,
     }
