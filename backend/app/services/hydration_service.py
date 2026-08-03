@@ -7,6 +7,7 @@ This service orchestrates:
 
 Designed to run as a Celery background task.
 """
+
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
@@ -19,20 +20,50 @@ from app.models.book import Book
 
 logger = logging.getLogger(__name__)
 
-OPENLIBRARY_SUBJECTS: dict[int, str] = {
-    6: "juvenile_fiction",
-    7: "juvenile_fiction",
-    8: "juvenile_fiction",
-    9: "juvenile_fiction",
-    10: "juvenile_fiction",
-    11: "juvenile_fiction",
-    12: "juvenile_fiction",
-    13: "young_adult_fiction",
-    14: "young_adult_fiction",
-    15: "young_adult_fiction",
-    16: "young_adult_fiction",
-    17: "young_adult_fiction",
-    18: "fantasy",
+# Per-age subject lists, ordered primary → secondary. All subjects verified to
+# return results against OpenLibrary's search API. Multiple subjects per age give
+# each grade level diverse books instead of sharing one coarse subject.
+# Age 18 (adult) reuses verified subjects to preserve the previous mapping.
+OPENLIBRARY_SUBJECTS: dict[int, list[str]] = {
+    6: ["easy_readers", "picture_books", "children's_stories"],
+    7: ["readers_elementary", "juvenile_fiction", "animals_juvenile_fiction"],
+    8: ["chapter_books", "school_stories", "humorous_stories"],
+    9: ["juvenile_fiction", "adventure_stories", "detective_and_mystery_stories"],
+    10: [
+        "middle_school_fiction",
+        "fantasy_juvenile_fiction",
+        "friendship_juvenile_fiction",
+    ],
+    11: [
+        "children's_stories",
+        "science_fiction_juvenile",
+        "historical_fiction_juvenile",
+    ],
+    12: ["juvenile_fiction", "action_and_adventure", "fantasy"],
+    13: ["young_adult_fiction", "coming_of_age", "school_stories"],
+    14: ["young_adult_fiction", "romance_fiction", "mystery_fiction"],
+    15: ["science_fiction", "fantasy_fiction", "young_adult_fiction"],
+    16: ["historical_fiction", "dystopian_fiction", "young_adult_fiction"],
+    17: ["fantasy", "science_fiction", "young_adult_fiction"],
+    18: ["fantasy", "science_fiction", "young_adult_fiction"],
+}
+
+# School grade (1-12) → lower age bound used for OpenLibrary queries.
+# _store_book sets age_range_lower=age and age_range_upper=age+2, which
+# reasonably encompasses each grade's age range.
+GRADE_AGE_MAP: dict[int, int] = {
+    1: 6,
+    2: 7,
+    3: 8,
+    4: 9,
+    5: 10,
+    6: 11,
+    7: 12,
+    8: 13,
+    9: 14,
+    10: 15,
+    11: 16,
+    12: 17,
 }
 
 
@@ -70,49 +101,58 @@ class HydrationService:
         Returns:
             List of stored book metadata dicts
         """
-        subject = OPENLIBRARY_SUBJECTS.get(age, "juvenile_fiction")
-        logger.info(f"Fetching up to {limit} books for age {age} (subject: {subject})")
+        subjects = self._subjects_for_age(age)
+        logger.info(
+            f"Fetching up to {limit} books for age {age} (subjects: {subjects})"
+        )
 
         stored: list[dict] = []
         existing_isbns = self._get_existing_isbns()
 
         try:
             with httpx.Client(timeout=30.0) as client:
-                page = 1
-                while len(stored) < limit and page <= 10:
-                    response = client.get(
-                        self.OPENLIBRARY_SEARCH,
-                        params={
-                            "subject": subject,
-                            "limit": min(50, limit - len(stored)),
-                            "page": page,
-                            "fields": "title,author_name,isbn,first_publish_year,cover_i,subject",
-                        },
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-
-                    for doc in data.get("docs", []):
-                        isbn = self._extract_isbn(doc)
-                        if not isbn or isbn in existing_isbns:
-                            continue
-                        existing_isbns.add(isbn)
-
-                        book = self._store_book(doc, isbn, age)
-                        stored.append(
-                            {
-                                "id": str(book.id),
-                                "title": book.title,
-                                "author": book.author,
-                                "isbn": book.isbn,
-                            }
-                        )
-                        if len(stored) >= limit:
-                            break
-
-                    if len(data.get("docs", [])) == 0:
+                # Pagination resets per subject so each subject contributes
+                # its top results (page 1) before we page deeper. If one
+                # subject is exhausted, the next subject is tried.
+                for subject in subjects:
+                    if len(stored) >= limit:
                         break
-                    page += 1
+                    page = 1
+                    while len(stored) < limit and page <= 10:
+                        response = client.get(
+                            self.OPENLIBRARY_SEARCH,
+                            params={
+                                "subject": subject,
+                                "limit": min(50, limit - len(stored)),
+                                "page": page,
+                                "fields": "title,author_name,isbn,first_publish_year,cover_i,subject",
+                            },
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+
+                        for doc in data.get("docs", []):
+                            isbn = self._extract_isbn(doc)
+                            if not isbn or isbn in existing_isbns:
+                                continue
+                            existing_isbns.add(isbn)
+
+                            book = self._store_book(doc, isbn, age)
+                            stored.append(
+                                {
+                                    "id": str(book.id),
+                                    "title": book.title,
+                                    "author": book.author,
+                                    "isbn": book.isbn,
+                                }
+                            )
+                            if len(stored) >= limit:
+                                break
+
+                        if len(data.get("docs", [])) == 0:
+                            # Subject exhausted — move on to the next subject.
+                            break
+                        page += 1
 
         except Exception as e:
             logger.error(f"Failed to fetch books: {e}")
@@ -121,8 +161,26 @@ class HydrationService:
         logger.info(f"Stored {len(stored)} new books for age {age}")
         return stored
 
+    def _subjects_for_age(self, age: int) -> list[str]:
+        """Return the ordered subject list to query for an age.
+
+        Appends the broad age-appropriate subject as a final fallback so a
+        grade that falls short of the limit still gets a top-up attempt.
+        """
+        subjects = list(OPENLIBRARY_SUBJECTS.get(age, ["juvenile_fiction"]))
+        fallback = "juvenile_fiction" if age <= 12 else "young_adult_fiction"
+        if fallback not in subjects:
+            subjects.append(fallback)
+        return subjects
+
     def _get_existing_isbns(self) -> set[str]:
-        """Return set of ISBNs already in the database."""
+        """Return set of ISBNs already in the database.
+
+        Note: a full-table ISBN scan is acceptable at the current scale
+        (<10K books, per ADR-002). If the catalog grows significantly,
+        replace this with an ``INSERT ... ON CONFLICT (isbn) DO NOTHING``
+        upsert so dedup happens in the database instead of in memory.
+        """
         rows = self.db.query(Book.isbn).filter(Book.isbn.isnot(None)).all()
         return {row[0] for row in rows if row[0]}
 

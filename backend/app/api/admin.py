@@ -1,24 +1,36 @@
 """Admin API endpoints — hydration management, protected by admin key."""
+
+import asyncio
+import logging
 import uuid
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.database import get_db
-from app.services.hydration_service import HydrationService
+from app.core.database import SessionLocal, get_db
+from app.services.hydration_service import GRADE_AGE_MAP, HydrationService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 settings = get_settings()
 
-# In-memory task store (production would use Redis)
+# In-memory task store (production would use Redis). Lost on restart — an
+# acceptable limitation (S2): hydrate-all is idempotent (ISBN dedup), so a
+# lost task can simply be re-triggered after a restart.
 _tasks: dict[str, dict] = {}
 
+# Strong references for asyncio background tasks so they are never garbage
+# collected mid-execution (see asyncio.create_task documentation).
+_background_tasks: set[asyncio.Task] = set()
 
-def _verify_admin_key(x_admin_key: str | None = Header(None, alias="X-Admin-Key")) -> None:
+
+def _verify_admin_key(
+    x_admin_key: str | None = Header(None, alias="X-Admin-Key"),
+) -> None:
     """Verify the admin API key header."""
     if not settings.admin_api_key:
         raise HTTPException(
@@ -37,6 +49,22 @@ class HydrateRequest(BaseModel):
     limit: int = Field(100, ge=1, le=500, description="Maximum books to fetch")
 
 
+class HydrateAllRequest(BaseModel):
+    start_grade: int = Field(
+        1, ge=1, le=12, description="First grade to hydrate (1-12)"
+    )
+    end_grade: int = Field(12, ge=1, le=12, description="Last grade to hydrate (1-12)")
+    books_per_grade: int = Field(
+        100, ge=1, le=500, description="Maximum books per grade"
+    )
+
+    @model_validator(mode="after")
+    def _validate_grade_range(self) -> "HydrateAllRequest":
+        if self.end_grade < self.start_grade:
+            raise ValueError("end_grade must be >= start_grade")
+        return self
+
+
 class HydrateResponse(BaseModel):
     task_id: str
     status: str
@@ -51,7 +79,29 @@ class HydrateStatusResponse(BaseModel):
     errors: list[str] = []
 
 
-@router.post("/hydrate", response_model=HydrateResponse, status_code=status.HTTP_202_ACCEPTED)
+class GradeHydrationStatus(BaseModel):
+    grade: int
+    age: int
+    status: str = "pending"  # 'pending', 'processing', 'completed', 'failed'
+    books_processed: int = 0
+    error: str | None = None
+
+
+class HydrateAllStatusResponse(BaseModel):
+    task_id: str
+    status: str  # 'pending', 'processing', 'completed', 'failed'
+    start_grade: int
+    end_grade: int
+    books_per_grade: int
+    grades: list[GradeHydrationStatus]
+    books_processed: int = 0
+    questions_generated: int = 0
+    errors: list[str] = []
+
+
+@router.post(
+    "/hydrate", response_model=HydrateResponse, status_code=status.HTTP_202_ACCEPTED
+)
 def trigger_hydration(
     request: HydrateRequest,
     db: Session = Depends(get_db),
@@ -84,6 +134,106 @@ def trigger_hydration(
     )
 
 
+@router.post(
+    "/hydrate-all",
+    response_model=HydrateResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def trigger_hydrate_all(
+    request: HydrateAllRequest,
+    _: None = Depends(_verify_admin_key),
+):
+    """Trigger background hydration for a range of grades (1-12).
+
+    Returns 202 immediately (R2 fix); the actual hydration runs in a worker
+    thread via ``asyncio.to_thread`` so the HTTP connection is never held
+    open for the full 30-60s job.
+    """
+    # Concurrency guard (S3): only one hydration task may run at a time.
+    if any(t.get("status") == "processing" for t in _tasks.values()):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A hydration task is already running.",
+        )
+
+    task_id = str(uuid.uuid4())
+    _tasks[task_id] = {
+        "task_id": task_id,
+        "status": "processing",
+        "start_grade": request.start_grade,
+        "end_grade": request.end_grade,
+        "books_per_grade": request.books_per_grade,
+        "grades": {
+            str(grade): {
+                "grade": grade,
+                "age": GRADE_AGE_MAP[grade],
+                "status": "pending",
+                "books_processed": 0,
+                "error": None,
+            }
+            for grade in range(request.start_grade, request.end_grade + 1)
+        },
+        "books_processed": 0,
+        "questions_generated": 0,
+        "errors": [],
+    }
+
+    # The hydration pipeline (httpx + SQLAlchemy) is synchronous, so it is
+    # offloaded to a worker thread. Not Celery: ADR-004 defers Celery to the
+    # question-generation path, and this is a one-time data load.
+    background_task = asyncio.create_task(asyncio.to_thread(_run_hydrate_all, task_id))
+    _background_tasks.add(background_task)
+    background_task.add_done_callback(_background_tasks.discard)
+
+    return HydrateResponse(
+        task_id=task_id,
+        status="processing",
+        message=(
+            f"Hydration job started for grades "
+            f"{request.start_grade}-{request.end_grade}"
+        ),
+    )
+
+
+def _run_hydrate_all(task_id: str) -> None:
+    """Synchronous hydrate-all worker, executed in a worker thread.
+
+    Uses a fresh DB session because the request-scoped session is closed as
+    soon as the endpoint returns 202. Each grade is independent: a failure
+    in one grade is recorded per-grade and does not stop the others.
+    """
+    task = _tasks.get(task_id)
+    if task is None:
+        return
+
+    db = SessionLocal()
+    try:
+        service = HydrationService(db, openai_api_key=settings.openai_api_key)
+        total = 0
+        for grade in range(task["start_grade"], task["end_grade"] + 1):
+            grade_entry = task["grades"][str(grade)]
+            grade_entry["status"] = "processing"
+            try:
+                books = service.fetch_top_books_for_age(
+                    grade_entry["age"], task["books_per_grade"]
+                )
+                grade_entry["books_processed"] = len(books)
+                grade_entry["status"] = "completed"
+                total += len(books)
+            except Exception as e:
+                logger.error(f"Hydration failed for grade {grade}: {e}")
+                grade_entry["status"] = "failed"
+                grade_entry["error"] = str(e)
+                task["errors"].append(f"grade {grade}: {e}")
+            task["books_processed"] = total
+
+        # Per-grade errors are surfaced individually; the task only fails
+        # outright if every grade failed (partial success stays 'completed').
+        task["status"] = "failed" if (total == 0 and task["errors"]) else "completed"
+    finally:
+        db.close()
+
+
 @router.get("/hydrate/{task_id}/status", response_model=HydrateStatusResponse)
 def get_hydration_status(
     task_id: str,
@@ -93,15 +243,61 @@ def get_hydration_status(
     try:
         uuid.UUID(task_id)
     except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid task ID.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid task ID."
+        )
 
     task = _tasks.get(task_id)
     if not task:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Task not found."
+        )
 
     return HydrateStatusResponse(
         task_id=task["task_id"],
         status=task["status"],
+        books_processed=task.get("books_processed", 0),
+        questions_generated=task.get("questions_generated", 0),
+        errors=task.get("errors", []),
+    )
+
+
+@router.get("/hydrate-all/{task_id}/status", response_model=HydrateAllStatusResponse)
+def get_hydrate_all_status(
+    task_id: str,
+    _: None = Depends(_verify_admin_key),
+):
+    """Get the per-grade status of a hydrate-all job."""
+    try:
+        uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid task ID."
+        )
+
+    task = _tasks.get(task_id)
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Task not found."
+        )
+
+    grades = [
+        GradeHydrationStatus(
+            grade=entry["grade"],
+            age=entry["age"],
+            status=entry["status"],
+            books_processed=entry["books_processed"],
+            error=entry["error"],
+        )
+        for entry in sorted(task["grades"].values(), key=lambda g: g["grade"])
+    ]
+    return HydrateAllStatusResponse(
+        task_id=task["task_id"],
+        status=task["status"],
+        start_grade=task["start_grade"],
+        end_grade=task["end_grade"],
+        books_per_grade=task["books_per_grade"],
+        grades=grades,
         books_processed=task.get("books_processed", 0),
         questions_generated=task.get("questions_generated", 0),
         errors=task.get("errors", []),

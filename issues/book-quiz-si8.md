@@ -264,7 +264,40 @@ All changes stay within existing module boundaries (`hydration_service.py`, `adm
 
 ## Implementation Notes
 
-*Pending engineer delegation.*
+**Engineer**: Senior Software Engineer | **Date**: 2026-08-03
+
+### Changed Files
+
+1. `backend/app/services/hydration_service.py` — subject mapping, grade map, multi-subject fetch
+2. `backend/app/api/admin.py` — hydrate-all endpoints, background execution, concurrency guard
+3. `backend/tests/acceptance/test_admin_api.py` — acceptance tests for hydrate-all
+
+### Key Decisions
+
+- **Multi-subject fetch (R1)**: `OPENLIBRARY_SUBJECTS` is now `dict[int, list[str]]` using the 26 verified subjects. `fetch_top_books_for_age` iterates subjects in order, resetting pagination to page 1 per subject, collecting until `limit` is reached; an exhausted subject (empty page) falls through to the next one. Verified by ad-hoc script: `easy_readers p1 → p2 (empty) → picture_books p1` with limit respected.
+- **Background execution (R2)**: `POST /admin/hydrate-all` is an `async def` endpoint that returns 202 immediately and schedules the synchronous hydration pipeline via `asyncio.create_task(asyncio.to_thread(_run_hydrate_all, task_id))`. Task references are kept in a module-level set with a `done_callback` discard (prevents GC mid-flight; self-cleans). Not Celery — ADR-004 defers Celery to question generation; this is a one-time load.
+- **Fresh DB session in worker (S3-adjacent)**: the background worker creates its own `SessionLocal()` because the request-scoped session is closed as soon as the endpoint returns 202. Documented in `_run_hydrate_all` docstring.
+- **Concurrency guard (S3)**: 409 Conflict when any task in `_tasks` has `status == "processing"`. Covers both hydrate-all and the existing (synchronous) hydrate path, since both write to the same store.
+- **Per-grade status**: task store keeps a `grades` dict (grade → age/status/books_processed/error); `GET /admin/hydrate-all/{task_id}/status` returns per-grade breakdown plus aggregates. Partial failure semantics: a failing grade is marked `failed` with its error; the overall task is only `failed` if every grade failed.
+- **Broad fallback**: `_subjects_for_age` appends `juvenile_fiction` (ages ≤ 12) or `young_adult_fiction` (ages ≥ 13) as a final subject if not already present, per the plan's mitigation.
+- **`_get_existing_isbns` (S1)**: added comment noting full-table ISBN scan is acceptable <10K books per ADR-002; replace with `INSERT ... ON CONFLICT (isbn) DO NOTHING` if the catalog grows.
+- **In-memory task store (S2)**: documented in `admin.py` — lost on restart, acceptable because hydrate-all is idempotent (ISBN dedup) and can be re-triggered.
+- **`fetch_books_for_grade` (D1)**: NOT added — dead code otherwise, per plan review.
+- **D2**: existing `POST /admin/hydrate` behavior now benefits from multi-subject iteration automatically; no code change needed.
+
+### Deviations from Plan
+
+- **Age 18 added to the subject map**: the plan table stops at age 17, but the existing `POST /admin/hydrate` validates `age` up to 18. Added `18: ["fantasy", "science_fiction", "young_adult_fiction"]` reusing only already-verified subjects to preserve the pre-existing age-18 coverage (previously `"fantasy"`).
+- **`asyncio.to_thread` instead of raw `run_in_executor`**: equivalent mechanism, less boilerplate; satisfies the R2 requirement of `asyncio.create_task` + executor offloading.
+- **Test client context manager**: acceptance tests now use `with TestClient(app) as client` (single long-lived portal). Without it, starlette 1.3.1 creates a per-request portal whose `loop.close()` → `default_executor.shutdown(wait=True)` blocks the request until background worker threads finish and cancels the background task — which broke the 409 concurrency test and added 10s stalls. The context-manager form matches uvicorn's long-lived loop. Fixture is file-local; no other test files affected.
+
+### Verification
+
+- `pytest tests/unit/test_services.py tests/acceptance/test_admin_api.py` — 34 passed (23 pre-existing + 11 new)
+- `ruff check` + `ruff format --check` on the 3 changed files — clean
+- `mypy app/api/admin.py app/services/hydration_service.py` — no issues
+- OpenAPI schema confirms all 4 admin routes registered
+- Full `pytest tests/` — 26 failures are pre-existing repo test-pollution (identical failure set on clean baseline via `git stash`); my changes add 11 passing tests (39 → 50)
 
 ## Test Results
 
