@@ -1,0 +1,130 @@
+# ── Book Quiz — Local Development Stack ──────────────────────────────
+# Mirrors production services (PostgreSQL 16, Redis 7, Celery worker,
+# FastAPI backend, React frontend). Configuration flows from `.env`
+# (see ADR-dev-003) — .env is the ONLY difference between local and prod.
+#
+# Usage:
+#   docker compose up -d                 # docker-mode stack
+#   docker compose up -d db redis        # infra only (native-mode deps)
+#   docker compose down                  # stop, preserve volumes
+#   docker compose down -v               # stop + wipe volumes
+# ─────────────────────────────────────────────────────────────────────
+name: bookquiz
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: bookquiz-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bookquiz}
+      POSTGRES_USER: ${POSTGRES_USER:-bookquiz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bookquiz_dev}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bookquiz} -d ${POSTGRES_DB:-bookquiz}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - bookquiz-dev
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: bookquiz-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - bookquiz-dev
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bookquiz-backend
+    environment:
+      # In docker mode the DB/Redis hostnames resolve on the compose network.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-bookquiz}:${POSTGRES_PASSWORD:-bookquiz_dev}@db:5432/${POSTGRES_DB:-bookquiz}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-only-change-me}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-admin-dev-key}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-false}
+      ENVIRONMENT: development
+      DEBUG: "true"
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - bookquiz-dev
+    restart: unless-stopped
+
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bookquiz-celery
+    command: celery -A app.worker worker --loglevel=info --concurrency=2
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-bookquiz}:${POSTGRES_PASSWORD:-bookquiz_dev}@db:5432/${POSTGRES_DB:-bookquiz}
+      REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ENVIRONMENT: development
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    networks:
+      - bookquiz-dev
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api
+    container_name: bookquiz-frontend
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - bookquiz-dev
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    name: bookquiz-pgdata
+  redisdata:
+    name: bookquiz-redisdata
+
+networks:
+  bookquiz-dev:
+    name: bookquiz-dev

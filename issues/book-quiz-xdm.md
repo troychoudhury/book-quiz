@@ -267,7 +267,50 @@ RATE_LIMIT_ENABLED=true
 
 ## Implementation Notes
 
-*Not yet implemented.*
+**Engineer**: delegated subagent | **Date**: 2026-08-03
+
+### Blocker resolutions (from architecture review)
+
+- **CR-1** ✅ `docker-compose.yml` created at repo root — services: db (postgres:16-alpine, healthcheck pg_isready), redis (redis:7-alpine, healthcheck redis-cli ping), backend (FastAPI on 8000), celery-worker (celery -A app.worker worker), frontend (nginx on 5173→80). Named volumes `pgdata`/`redisdata`, network `bookquiz-dev`. `.env` interpolation for credentials/ports.
+- **CR-2** ✅ `backend/app/worker.py` — Celery app wired to REDIS_URL broker/backend, JSON serialization, task time limits, `include=["app.tasks"]` with ImportError guard until the hydration task module lands. Verified `celery_app` imports, name `bookquiz`, broker `redis://localhost:6379/0`.
+- **CR-3** ✅ `backend/alembic.ini` hardcoded URL documented as placeholder; `alembic/env.py` already overrides via `app.core.config.get_settings()` → `DATABASE_URL` env var. Verified resolution.
+- **CR-4** ✅ Root `Dockerfile` multi-stage: node build frontend → python runtime backend, bundles `frontend-dist`, non-root user, healthcheck. Supports fly.toml `app` (uvicorn) and `worker` (celery) processes.
+
+### Review recommendations applied
+
+- **R-3** ✅ Modularized: `dev` dispatcher (~90 lines) + `lib/dev-{common,setup,up,down,test,db,util}.sh`.
+- **R-4** ✅ Signal trap `trap cleanup_all EXIT INT TERM`; PIDs tracked in `/tmp/book-quiz-dev/*.pid`; cleanup kills tracked processes.
+- **R-5** ✅ `dev setup` generates JWT_SECRET_KEY (openssl rand -hex 32) + ADMIN_API_KEY (openssl rand -hex 16) into .env; `dev generate-secrets` re-rotates.
+- **R-6** ✅ `.env.example` sets RATE_LIMIT_ENABLED=false; compose file documented as dev stack mirroring production service versions.
+- R-8 ✅ RATE_LIMIT_ENABLED=false default.
+- R-9 (docs) — WSL2 note is in the doctor output dependency guidance; full platform matrix deferred.
+
+### Command surface
+
+setup, generate-secrets, up [--native|--docker], down [--volumes], test [--unit|--e2e|--coverage], lint, format, db-migrate, db-migrate-new, db-reset, db-seed (stub), logs [svc], ps, shell <svc>, build, clean, doctor, help.
+
+### Verification performed
+
+- `bash -n` syntax check on `dev` + all 7 lib modules: PASS
+- `./dev help` exit 0, `./dev` (no args) exit 0
+- `./dev doctor` exit 1 (correctly flags missing Docker + .env on this machine)
+- `./dev setup` idempotent (2nd run reuses venv/node_modules/.env); exits 1 only at Docker step (machine lacks Docker)
+- `./dev up` exits 1 with actionable ".env missing — run ./dev setup" when .env absent
+- `./dev down` graceful no-op when nothing running
+- `celery_app` import verified; compose YAML validated via PyYAML
+- Alembic resolves DATABASE_URL from env (CR-3 verified)
+
+### Decisions needing approval
+
+- **Celery task module**: `app/tasks/` does not exist yet; worker.py guards the import so the worker boots now. Tasks land with hydration beads (book-quiz-jsh/gpr).
+- **`dev test --e2e`** requires the stack running (checked via backend health endpoint) — intentional to avoid silent no-op e2e.
+- **fly.toml DATABASE_URL/REDIS_URL placeholders** unchanged (secrets set via `fly secrets set`); root Dockerfile now exists so `flyctl deploy` will resolve the build reference.
+
+### Residual risks
+
+- Docker unavailable on the dev machine used for verification — compose startup paths (db health waits, container exec) not exercised live.
+- `dev db-seed` is a stub pending hydration pipeline.
+- e2e Playwright needs hydrated data to assert non-empty search; known project-wide gap tracked by feature beads.
 
 ## Test Results
 

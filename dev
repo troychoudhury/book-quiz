@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+#==============================================================================
+# dev — Book Quiz developer tooling CLI
+#==============================================================================
+# Bring up, tear down, test, and manage the full local stack (PostgreSQL,
+# Redis, Celery, FastAPI backend, React frontend) with one command.
+#
+#   ./dev setup              First-time environment setup (idempotent)
+#   ./dev up [--native|--docker]   Start the full stack (default: native)
+#   ./dev down [--volumes]   Stop everything (--volumes wipes data)
+#   ./dev test [--unit|--e2e|--coverage]  Run the test suite
+#   ./dev lint / format      Lint / auto-format all code
+#   ./dev db-migrate / db-reset / db-seed  Database operations
+#   ./dev logs [svc] / ps    Logs / status
+#   ./dev build              Build production Docker images
+#   ./dev doctor             Diagnose common environment issues
+#   ./dev clean              Remove containers, venv, node_modules
+#   ./dev shell <svc>        Open a shell in a running container
+#   ./dev generate-secrets   Re-rotate JWT_SECRET_KEY / ADMIN_API_KEY
+#   ./dev help               Show this help
+#==============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export SCRIPT_DIR
+
+# Load shared helpers and command modules.
+# shellcheck source=lib/dev-common.sh
+source "${SCRIPT_DIR}/lib/dev-common.sh"
+# shellcheck source=lib/dev-setup.sh
+source "${SCRIPT_DIR}/lib/dev-setup.sh"
+# shellcheck source=lib/dev-up.sh
+source "${SCRIPT_DIR}/lib/dev-up.sh"
+# shellcheck source=lib/dev-down.sh
+source "${SCRIPT_DIR}/lib/dev-down.sh"
+# shellcheck source=lib/dev-test.sh
+source "${SCRIPT_DIR}/lib/dev-test.sh"
+# shellcheck source=lib/dev-db.sh
+source "${SCRIPT_DIR}/lib/dev-db.sh"
+# shellcheck source=lib/dev-util.sh
+source "${SCRIPT_DIR}/lib/dev-util.sh"
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        setup)             cmd_setup "$@" ;;
+        up)                cmd_up "$@" ;;
+        down)              cmd_down "$@" ;;
+        test)              cmd_test "$@" ;;
+        lint)              cmd_lint "$@" ;;
+        format)            cmd_format "$@" ;;
+        db-migrate)        cmd_db_migrate "$@" ;;
+        db-migrate-new)    cmd_db_migrate_new "$@" ;;
+        db-reset)          cmd_db_reset "$@" ;;
+        db-seed)           cmd_db_seed "$@" ;;
+        logs)              cmd_logs "$@" ;;
+        ps)                cmd_ps "$@" ;;
+        shell)             cmd_shell "$@" ;;
+        build)             cmd_build "$@" ;;
+        clean)             cmd_clean "$@" ;;
+        doctor)            cmd_doctor "$@" ;;
+        generate-secrets)  cmd_generate_secrets "$@" ;;
+        help|-h|--help)    cmd_help ;;
+        *)                 err "Unknown command: $cmd"; cmd_help; exit 1 ;;
+    esac
+}
+
+main "$@"
