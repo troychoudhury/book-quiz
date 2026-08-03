@@ -126,7 +126,72 @@ All 15 findings implemented. No new dependencies, no API contract changes.
 
 ## Code Review
 
-*Pending code-reviewer delegation.*
+**Reviewer**: lead-code-reviewer | **Date**: 2026-08-03 | **Commit**: 3662f66
+**Verdict: Conditional Pass** — 14/15 findings fully addressed and verified; 1 finding (M4) partially addressed (visualViewport test omitted); N5 dispositioned per plan (comment + smoke, no committed test).
+
+### Verification performed (re-run independently)
+
+| Check | Result |
+|-------|--------|
+| `vitest run` (frontend, full) | 15 passed (12 SearchBar incl. 4 new tests) |
+| `tsc -b` | passed |
+| `eslint --max-warnings 0` (3 changed files) | passed |
+| `prettier --check` (3 changed files) | passed |
+| `pytest TestBookAutocomplete` (backend) | 8 passed |
+| `pytest tests/unit` (backend) | 14 passed |
+| Smoke (TestClient + SQLite): missing q → 422; 201 chars → 422; 200 chars → 200; `Cache-Control: private, max-age=30` present; 30 req/min then 429 | all confirmed |
+| SQL echo: autocomplete emits exactly 1 SELECT (id, title, author, cover_url) | confirmed (M3) |
+
+### Finding-by-finding disposition
+
+| # | Status | Evidence |
+|---|--------|----------|
+| M1 isFetched gate | ✅ | `isFetched: enabled && !isStale && isFetched` in `useAutocomplete.ts`; empty state gated by `isFetched && suggestions.length === 0 && !isLoading && !isError` in `SearchBar.tsx:256`; new test "only shows the empty state after the request has resolved" |
+| M2 useId | ✅ | `useId()` in `SearchBar.tsx:35`; `aria-controls`, `<ul id>`, option ids all use `listboxId`; tests assert `aria-activedescendant` against rendered `options[i].id` (robust to useId format) |
+| M3 load_only/noload | ✅ | `books.py:90-93`; model confirms `lazy="selectin"` on `questions`/`quiz_attempts` (original 3-SELECT bug real); SQL echo confirms 1 SELECT |
+| M4 test gaps | ⚠️ Partial | loading ✓ ("shows a loading spinner..."), arrow-wrap ✓ ("wraps the highlight... ArrowUp"), debounce burst ✓ ("fires a single API call..."). **visualViewport test NOT added** — no `visualViewport` test exists anywhere in the repo; the plan silently substituted an isFetched-gating test. R5 positioning code remains untested. Disposition required. |
+| S-M1 rate limit | ✅ | `@limiter.limit("30/minute")` + `request: Request` (slowapi pattern matches auth.py); smoke: 429 after 30/min |
+| S-M2 max_length | ✅ | server `Query(max_length=200)` (smoke: 201→422, 200→200); client `maxLength={200}` |
+| N1 Escape blur | ✅ | `inputRef.current?.blur()` in Escape branch; test asserts `not.toHaveFocus()` |
+| N2 stale blanking | ✅ | `isStale = query !== debouncedQuery` blanks suggestions + suppresses isFetched; elegantly also guards M1 |
+| N3 aria-live | ✅ | `aria-live="polite"` on listbox `<ul>` |
+| N4 act warning | ✅ | `vi.useFakeTimers()` + `act(vi.advanceTimersByTime)`; `vi.useRealTimers()` in `afterEach`; no act warnings in run |
+| N5 422 test | ✅ dispositioned | max_length covered by S-M2; comment documents FastAPI built-in 422; NOT a committed test — see residual risk R1 |
+| N6 pg_trgm divergence | ✅ | docstring note in `books.py` |
+| L1 cover_url validation | ✅ | `cover_url?.startsWith('https://')` + `referrerPolicy="no-referrer"` + `loading="lazy"` |
+| L2 in-memory limiter | ✅ | comment above `@limiter.limit` + `security.py` docstring |
+| L3 Cache-Control | ✅ | `response.headers["Cache-Control"] = "private, max-age=30"`; smoke-verified |
+
+### 🟡 Major
+
+1. **M4 incomplete — visualViewport test omitted** (`frontend/src/components/SearchBar.test.tsx`). The issue's M4 explicitly lists "visualViewport" as a gap; the plan replaced it with isFetched-gating without documenting the disposition. The R5 `openUpward` positioning logic (`SearchBar.tsx:51-72`) remains untested. Either add the test (mock `window.visualViewport`, assert dropdown `bottom-full` class) or record an explicit deferral in the issue.
+2. **Security controls lack committed regression tests** (`backend/tests/acceptance/test_book_search.py`). Acceptance tests set `RATE_LIMIT_ENABLED=false`, so the 429 path is never exercised in CI; 422 (missing q / >200 chars) and Cache-Control are also only smoke-verified (my run, not in the suite). Add: rate-limit 429 test (with limiter enabled on a fresh app instance), 422/200-boundary tests, and a Cache-Control header assertion.
+
+### 🟢 Minor
+
+3. `frontend/src/hooks/useAutocomplete.ts:31` — `isStale` uses raw `query !== debouncedQuery`; the plan proposed trimmed comparison. Typing "harry" → "harry " blanks the list and flashes the spinner for the debounce window even though the trimmed query is unchanged (results then restore from cache). Cosmetic; consider `query.trim() !== debouncedQuery.trim()`.
+4. `frontend/src/components/SearchBar.tsx:217` — `aria-live="polite"` on the `<ul>` re-announces the whole list on every keystroke re-render, which can be noisy for screen-reader users. A visually-hidden live region announcing "N suggestions" is the more precise pattern; the requirement (N3) is met as written.
+5. `backend/app/api/books.py:90-93` — `load_only` defers scalar columns (`description`, `isbn`, age fields). Future code that touches those on autocomplete results would trigger per-row SELECTs (N+1). Harmless today; add a one-line warning comment for maintainers.
+6. `frontend/src/components/SearchBar.tsx:243` — the '📖' fallback emoji is exposed to screen readers as text (not `aria-hidden`). Pre-existing, but trivially fixable while touching this block.
+
+### ✅ Praise
+
+- The `isStale` mechanism in `useAutocomplete.ts` is a single elegant fix for both N2 (stale suggestions) and M1 (false empty state) — one predicate, both guards.
+- Tests assert `aria-activedescendant` against rendered option element ids instead of hardcoding `useId()` output — robust to React id-format changes.
+- M3 verified at the SQL level (1 SELECT), not just by reading the ORM options.
+- Fake-timer hygiene is correct: `useFakeTimers()` scoped per test, `useRealTimers()` restored in `afterEach`.
+- Backend changes match the existing slowapi pattern in `auth.py` (decorator order, `Request` injection).
+
+### Residual risks
+
+- **R1**: 429/422/Cache-Control behaviors are not covered by committed tests (see Major #2) — regression risk for security controls.
+- **R2**: `RATE_LIMIT_ENABLED=false` in acceptance tests means the limiter never runs in CI; a future import-order change (limiter instantiated before env is set) could silently break rate limiting without failing tests.
+- **R3**: Rate-limit keying is `get_remote_address` (client IP); behind a proxy without `behind_proxy=True`, all users may share one bucket. Same deferred-Redis infra concern as L2.
+- **R4**: In-memory limiter (L2) — 429 state resets on restart; multi-process deployments can exceed 30/min per process.
+
+## Security Audit
+
+*Pending security-auditor delegation.*
 
 ## Security Audit
 
