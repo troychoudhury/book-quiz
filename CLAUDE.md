@@ -105,3 +105,13 @@ See `docs/ARCHITECTURE.md` for full system design.
 4. **Zustand + React Query**: Global state (Zustand) + server state (React Query)
 5. **Feature branches**: One branch per bead/issue
 6. **Quality gates must pass**: lint → type-check → test → coverage before merge
+
+### Docker Invocation in Dev Scripts (CRITICAL)
+
+**NEVER use raw `docker exec` or `docker compose` in `lib/*.sh`.** Always use the wrappers:
+- `docker_run exec ...` (not `docker exec ...`)
+- `compose ...` or `compose_run ...` (not `docker compose ...`)
+
+These wrappers (in `lib/dev-common.sh`) handle DOCKER_HOST dead-socket fallback, sudo, and sg. Raw usage bypasses this chain and causes environment-dependent failures. This lesson is captured in beads memory — run `bd remember --list` to review.
+
+A pre-commit hook enforces this. New lib scripts will be rejected on commit if they use raw docker commands.

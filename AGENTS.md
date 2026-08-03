@@ -47,6 +47,15 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## Project Memory & Lessons Learned
+
+**Before starting ANY new task**, run `bd prime` and review the **Persistent Memories** section. It contains lessons learned from past bugs and incidents. To search for specific topics: `bd memories <keyword>`.
+
+When you fix a bug or discover a pattern that should be preserved, capture it with:
+```bash
+bd remember "<insight>" --key <slug>
+```
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
 
