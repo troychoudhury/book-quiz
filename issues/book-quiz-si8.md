@@ -243,7 +243,7 @@ psql -c "SELECT age_range_lower, count(*) FROM books GROUP BY age_range_lower OR
 
 | # | Issue | Resolution |
 |---|-------|------------|
-| **R1** | Unverified OpenLibrary subject slugs — `easy_readers`, `readers_elementary`, `chapter_books`, `middle_school_fiction`, `coming_of_age`, `dystopian_fiction` may not be valid OpenLibrary subjects. Must pre-verify each subject before implementation. | Verify all subjects with curl; replace any that return 0 results. |
+| **R1** | ~~Unverified OpenLibrary subject slugs~~ **RESOLVED** — all 26 subjects verified with curl. Lowest counts: `easy_readers` (297), `chapter_books` (963), `dystopian_fiction` (955), `middle_school_fiction` (1521). All sufficient for 100 books/grade. | ✅ Verified 2026-08-03 |
 | **R2** | Execution model mismatch — plan shows 202 async pattern but existing `POST /admin/hydrate` runs synchronously. A 12-grade hydration holds the HTTP connection for 30-60s, risking proxy timeouts. | Use `asyncio.create_task` + thread executor to run hydration in background, returning 202 immediately. |
 
 ### Other Findings
