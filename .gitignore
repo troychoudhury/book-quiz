@@ -4,9 +4,18 @@
 .beads-credential-key
 .beads/proxieddb/
 
-# AI Agent Loop
+# AI Agent Loop — process artifacts (not source code)
 .loop-state.json
 .logs/
+
+# Agent session logs & transient artifacts
+.pi-subagents/artifacts/*_input.md
+.pi-subagents/artifacts/*_meta.json
+.pi-subagents/artifacts/*_transcript.jsonl
+.pi-subagents/artifacts/*_output.md
+
+# Keep only the consolidated output directory
+!.pi-subagents/artifacts/outputs/
 
 # Python
 __pycache__/
