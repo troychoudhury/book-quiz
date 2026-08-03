@@ -35,7 +35,7 @@ export default function SearchBar({ variant = 'hero', autoFocus = false }: Searc
   const listboxId = useId();
   const optionId = (index: number) => `${listboxId}-option-${index}`;
 
-  const { suggestions, isLoading, isFetched, isError } = useAutocomplete(query);
+  const { suggestions, isLoading, isFetched, isError, isPending } = useAutocomplete(query);
 
   const isHero = variant === 'hero';
   const trimmedQuery = query.trim();
@@ -201,19 +201,8 @@ export default function SearchBar({ variant = 'hero', autoFocus = false }: Searc
             openUpward ? 'bottom-full mb-2' : 'top-full mt-2'
           }`}
         >
-          {isLoading && suggestions.length === 0 ? (
-            <div
-              role="status"
-              className="flex items-center justify-center gap-2 px-4 py-3 text-sm text-gray-500"
-            >
-              <span
-                className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-blue-600"
-                aria-hidden="true"
-              />
-              Searching...
-            </div>
-          ) : suggestions.length > 0 ? (
-            <ul id={listboxId} role="listbox" aria-label="Search suggestions" aria-live="polite">
+          {suggestions.length > 0 ? (
+            <ul id={listboxId} role="listbox" aria-label="Search suggestions" aria-live="polite" className="max-h-64 overflow-y-auto">
               {suggestions.map((suggestion, index) => (
                 <li
                   key={suggestion.id}
@@ -253,9 +242,30 @@ export default function SearchBar({ variant = 'hero', autoFocus = false }: Searc
                 </li>
               ))}
             </ul>
-          ) : isFetched && suggestions.length === 0 && !isLoading && !isError ? (
+          ) : isLoading || isPending ? (
+            <div
+              role="status"
+              className="flex items-center justify-center gap-2 px-4 py-3 text-sm text-gray-500"
+            >
+              <span
+                className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-blue-600"
+                aria-hidden="true"
+              />
+              Searching...
+            </div>
+          ) : isFetched && !isLoading && !isError ? (
             <div className="px-4 py-3 text-sm text-gray-500">No matching books found</div>
           ) : null}
+          {/* Loading indicator below existing results during re-fetch */}
+          {suggestions.length > 0 && isLoading && (
+            <div className="flex items-center justify-center gap-2 border-t border-gray-100 px-4 py-2 text-xs text-gray-400">
+              <span
+                className="h-3 w-3 animate-spin rounded-full border-2 border-gray-300 border-t-blue-600"
+                aria-hidden="true"
+              />
+              Updating...
+            </div>
+          )}
         </div>
       )}
     </div>

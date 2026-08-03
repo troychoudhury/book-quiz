@@ -27,18 +27,21 @@ export function useAutocomplete(query: string) {
   });
 
   return useMemo(() => {
-    // N2: while the typed query hasn't settled into the debounced value yet,
-    // blank suggestions so stale results from the previous debounce window are
-    // never shown. isFetched is also suppressed during this window so consumers
-    // never flash a false "No matching books found" message (M1).
-    const isStale = query !== debouncedQuery;
-    const suggestions: AutocompleteSuggestion[] = isStale ? [] : (data?.suggestions ?? []);
+    // Keep previous results visible during debounce/refetch to avoid
+    // jarring blink-on-keystroke. Loading state shows a spinner alongside
+    // existing suggestions, not instead of them.
+    const suggestions: AutocompleteSuggestion[] = data?.suggestions ?? [];
+
+    // True when user has typed >= 2 chars but the debounced query hasn't
+    // caught up yet — used to show an initial spinner before first fetch.
+    const isPending = query.trim().length >= MIN_QUERY_LENGTH && query !== debouncedQuery;
 
     return {
       suggestions,
-      isLoading: isStale || (enabled && isLoading),
-      isFetched: enabled && !isStale && isFetched,
-      isError: enabled && !isStale && isError,
+      isLoading: enabled && isLoading,
+      isFetched: enabled && isFetched,
+      isError: enabled && isError,
+      isPending,
     };
   }, [query, debouncedQuery, data, enabled, isLoading, isFetched, isError]);
 }

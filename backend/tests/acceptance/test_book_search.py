@@ -348,13 +348,13 @@ class TestBookAutocomplete:
         assert suggestions[1]["title"].startswith("Harry")
         assert suggestions[0]["cover_url"] == "https://example.com/rowling.jpg"
 
-    def test_autocomplete_respects_limit_5(self, client, autocomplete_funcs):
-        """At most 5 suggestions are returned even when more books match."""
+    def test_autocomplete_respects_limit_50(self, client, autocomplete_funcs):
+        """At most 50 suggestions are returned even when more books match."""
         db = TestingSessionLocal()
         db.add_all(
             [
                 Book(id=uuid.uuid4(), title=f"Common Title {i}", author="Shared Author")
-                for i in range(10)
+                for i in range(60)
             ]
         )
         db.commit()
@@ -363,7 +363,7 @@ class TestBookAutocomplete:
         response = client.get("/api/v1/books/autocomplete", params={"q": "common"})
         assert response.status_code == 200
         suggestions = response.json()["suggestions"]
-        assert len(suggestions) == 5
+        assert len(suggestions) == 50
         # Secondary ordering is deterministic: title ASC.
         titles = [s["title"] for s in suggestions]
         assert titles == sorted(titles)

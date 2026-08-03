@@ -67,7 +67,7 @@ def autocomplete_books(
     ),
     db: Session = Depends(get_db),
 ):
-    """Return up to 5 book suggestions ranked by title/author similarity.
+    """Return up to 50 book suggestions ranked by title/author similarity.
 
     Ranking uses GREATEST(similarity(title, q), similarity(author, q)) so a
     strong match on either field surfaces (blocker B1). Requires PostgreSQL
@@ -98,7 +98,7 @@ def autocomplete_books(
         .order_by(
             func.greatest(title_similarity, author_similarity).desc(), Book.title.asc()
         )
-        .limit(5)
+        .limit(50)
         .all()
     )
 
