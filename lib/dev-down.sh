@@ -24,10 +24,10 @@ cmd_down() {
     if command_exists docker && docker info >/dev/null 2>&1; then
         if [[ "$with_volumes" == true ]]; then
             info "Stopping containers and removing volumes (data will be lost)..."
-            compose down -v 2>/dev/null || docker compose down -v 2>/dev/null || true
+            compose down -v 2>/dev/null || compose_run down -v 2>/dev/null || true
         else
             info "Stopping containers (volumes preserved)..."
-            compose down 2>/dev/null || docker compose down 2>/dev/null || true
+            compose down 2>/dev/null || compose_run down 2>/dev/null || true
         fi
     else
         warn "Docker not available — skipping container teardown."

@@ -50,7 +50,7 @@ cmd_db_reset() {
     compose up -d db redis
     info "Waiting for database..."
     local attempts=0
-    until docker exec bookquiz-db pg_isready -U "${POSTGRES_USER:-bookquiz}" >/dev/null 2>&1; do
+    until docker_run exec bookquiz-db pg_isready -U "${POSTGRES_USER:-bookquiz}" >/dev/null 2>&1; do
         attempts=$((attempts + 1))
         if [[ $attempts -ge 30 ]]; then
             err "Database not ready after 60s."

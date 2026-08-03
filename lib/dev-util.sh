@@ -59,7 +59,7 @@ cmd_logs() {
             tail -f "$logfile"
             return 0
         fi
-        # Otherwise try docker compose logs
+        # Otherwise try container logs via the compose helper
         if command_exists docker && docker info >/dev/null 2>&1; then
             compose logs -f "$svc"
             return 0
@@ -73,7 +73,7 @@ cmd_logs() {
     fi
     if command_exists docker && docker info >/dev/null 2>&1; then
         echo ""
-        info "Container logs (docker compose logs -f <svc>):"
+        info "Container logs (compose logs -f <svc>):"
         compose ps --format '{{.Name}}' 2>/dev/null | sed 's/^/  /'
     fi
 }
@@ -99,7 +99,7 @@ cmd_ps() {
     if command_exists docker && docker info >/dev/null 2>&1; then
         echo ""
         info "Containers:"
-        compose ps 2>/dev/null || docker compose ps 2>/dev/null || true
+        compose ps 2>/dev/null || compose_run ps 2>/dev/null || true
     fi
 }
 
@@ -112,11 +112,11 @@ cmd_shell() {
     fi
     require_docker
     case "$svc" in
-        db)     docker exec -it bookquiz-db psql -U "${POSTGRES_USER:-bookquiz}" "${POSTGRES_DB:-bookquiz}" ;;
-        redis)  docker exec -it bookquiz-redis redis-cli ;;
+        db)     docker_run exec -it bookquiz-db psql -U "${POSTGRES_USER:-bookquiz}" "${POSTGRES_DB:-bookquiz}" ;;
+        redis)  docker_run exec -it bookquiz-redis redis-cli ;;
         backend|frontend|celery-worker)
             local cname="bookquiz-${svc%-*}"
-            docker exec -it "$cname" /bin/sh ;;
+            docker_run exec -it "$cname" /bin/sh ;;
         *)      err "Unknown service: $svc"; exit 1 ;;
     esac
 }
