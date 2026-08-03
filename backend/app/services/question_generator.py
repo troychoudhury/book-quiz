@@ -7,11 +7,21 @@ book chapters focusing on:
 - Characters and emotions
 - Morals, outcomes, and interpretations
 """
+import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
+from openai import OpenAI
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GeneratedChoice:
+    """A single answer choice."""
+    text: str
+    is_correct: bool
 
 
 @dataclass
@@ -20,9 +30,9 @@ class GeneratedQuestion:
     question_text: str
     question_type: str  # 'theme', 'fact', 'character', 'moral', 'interpretation'
     difficulty: str  # 'easy', 'medium', 'hard'
-    choices: list[dict]  # [{"text": "...", "is_correct": bool}, ...]
-    chapter: int
-    chapter_title: str
+    choices: list[GeneratedChoice] = field(default_factory=list)
+    chapter: int = 0
+    chapter_title: str = ""
 
 
 class QuestionGenerator:
@@ -37,15 +47,37 @@ Rules:
 2. Each question must have exactly 4 choices (A-D)
 3. Only ONE choice should be correct
 4. Distractors should be plausible but clearly wrong to someone who read carefully
-5. Vary question types: main themes, facts/events, characters/emotions, morals/interpretations
+5. Vary question types: theme, fact, character, moral, interpretation
 6. Include 'all of the above' or 'none of the above' as choices where appropriate
 7. Questions should test memory recall, comprehension, and language skills
-8. Output must be valid JSON matching the specified schema
-"""
+8. Output must be valid JSON as an array of question objects
+
+Output format (JSON array):
+[
+  {
+    "question_text": "What is the main theme of this chapter?",
+    "question_type": "theme",
+    "difficulty": "medium",
+    "choices": [
+      {"text": "Love conquers all", "is_correct": true},
+      {"text": "Power corrupts", "is_correct": false},
+      {"text": "Knowledge is power", "is_correct": false},
+      {"text": "Revenge is sweet", "is_correct": false}
+    ]
+  }
+]"""
 
     def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4o-mini"):
         self.api_key = api_key
         self.model = model
+        self._client: OpenAI | None = None
+
+    @property
+    def client(self) -> OpenAI | None:
+        """Lazy OpenAI client — returns None if no API key configured."""
+        if self._client is None and self.api_key:
+            self._client = OpenAI(api_key=self.api_key)
+        return self._client
 
     def generate_for_chapter(
         self,
@@ -55,15 +87,75 @@ Rules:
         chapter_title: str,
         chapter_summary: str,
     ) -> list[GeneratedQuestion]:
-        """Generate questions for a single chapter.
+        """Generate 10 multiple-choice questions for a chapter using OpenAI.
 
-        This is a STUB — implementation would call OpenAI API with
-        a carefully crafted prompt including the chapter summary.
+        Args:
+            book_title: Title of the book
+            author: Author name
+            chapter_number: Chapter number
+            chapter_title: Chapter title
+            chapter_summary: Summary/description of chapter content
+
+        Returns:
+            List of GeneratedQuestion objects (empty if no API key or on error)
         """
-        logger.info(
-            f"Generating questions for '{book_title}' ch.{chapter_number} (stub)"
+        if not self.client:
+            logger.warning("No OpenAI API key configured — skipping question generation")
+            return []
+
+        prompt = self._build_prompt(
+            book_title, author, chapter_number, chapter_title, chapter_summary
         )
-        return []  # Stub
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=4096,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            if not content:
+                logger.error("Empty response from OpenAI")
+                return []
+
+            data = json.loads(content)
+            # Handle both {"questions": [...]} and [...] formats
+            questions_raw = data if isinstance(data, list) else data.get("questions", [])
+
+            result: list[GeneratedQuestion] = []
+            for q in questions_raw:
+                choices = [
+                    GeneratedChoice(text=c["text"], is_correct=c["is_correct"])
+                    for c in q.get("choices", [])
+                ]
+                result.append(
+                    GeneratedQuestion(
+                        question_text=q["question_text"],
+                        question_type=q.get("question_type", "fact"),
+                        difficulty=q.get("difficulty", "medium"),
+                        choices=choices,
+                        chapter=chapter_number,
+                        chapter_title=chapter_title,
+                    )
+                )
+
+            logger.info(
+                f"Generated {len(result)} questions for '{book_title}' ch.{chapter_number}"
+            )
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse OpenAI response: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"OpenAI API call failed: {e}")
+            return []
 
     def _build_prompt(
         self,
@@ -84,4 +176,7 @@ Generate 10 multiple-choice questions testing a reader's:
 - Understanding of character motivations and emotions
 - Interpretation of moral lessons and outcomes
 - Language and vocabulary skills
+
+Include at least one 'all of the above' or 'none of the above' choice variant.
+Vary difficulty: 3 easy, 4 medium, 3 hard questions.
 """
