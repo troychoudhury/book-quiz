@@ -23,6 +23,18 @@ export interface BookSearchResponse {
   size: number;
 }
 
+// ── Autocomplete Types ────────────────────────────────────────────
+export interface AutocompleteSuggestion {
+  id: string;
+  title: string;
+  author: string;
+  cover_url: string | null;
+}
+
+export interface AutocompleteResponse {
+  suggestions: AutocompleteSuggestion[];
+}
+
 // ── Quiz Types ──────────────────────────────────────────────────
 export interface ChoiceResponse {
   id: string;

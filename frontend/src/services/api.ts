@@ -2,6 +2,7 @@ import axios from 'axios';
 
 import { useAuthStore } from '../stores/authStore';
 import type {
+  AutocompleteResponse,
   BookDetail,
   BookSearchResponse,
   CompleteQuizResponse,
@@ -101,6 +102,8 @@ export const booksApi = {
   search: (q: string, page = 1, size = 20) =>
     api.get<BookSearchResponse>('/api/v1/books', { params: { q, page, size } }),
   getById: (id: string) => api.get<BookDetail>(`/api/v1/books/${id}`),
+  autocomplete: (q: string) =>
+    api.get<AutocompleteResponse>('/api/v1/books/autocomplete', { params: { q } }),
 };
 
 // ── Quiz API ────────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@
 These tests validate the search behavior from a user's perspective:
 fuzzy title matching, ISBN lookup, pagination, and empty results.
 """
+
 import os
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-acceptance-tests")
@@ -13,7 +14,7 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import case, create_engine, func as sa_func
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -108,12 +109,14 @@ def sample_books():
         db.add(q)
         db.flush()
         for pos in range(4):
-            db.add(Choice(
-                question_id=q.id,
-                choice_text=f"Choice {pos}",
-                is_correct=(pos == 0),
-                position=pos,
-            ))
+            db.add(
+                Choice(
+                    question_id=q.id,
+                    choice_text=f"Choice {pos}",
+                    is_correct=(pos == 0),
+                    position=pos,
+                )
+            )
     db.commit()
 
     book_ids = [str(b.id) for b in books]
@@ -255,3 +258,146 @@ class TestBookDetail:
         fake_id = str(uuid.uuid4())
         response = client.get(f"/api/v1/books/{fake_id}")
         assert response.status_code == 404
+
+
+class _SqliteFunc:
+    """Stand-in for sqlalchemy.func in the books module while tests run on SQLite.
+
+    pg_trgm's similarity()/greatest() are PostgreSQL-only, so the acceptance
+    tests patch ``app.api.books.func`` with dialect-portable SQL expressions:
+
+      similarity(col, q) -> 1.0 exact match (case-insensitive), 0.7 substring, else 0.0
+      greatest(a, b)     -> SQLite scalar max(a, b)
+
+    This keeps the production endpoint code using the real pg_trgm functions
+    while still exercising the full query/response path on SQLite.
+    """
+
+    def similarity(self, column, query):
+        lowered = str(query).strip().lower()
+        return case(
+            (sa_func.lower(column) == lowered, 1.0),
+            (sa_func.lower(column).like(f"%{lowered}%"), 0.7),
+            else_=0.0,
+        )
+
+    def greatest(self, first, second):
+        return sa_func.max(first, second)
+
+
+@pytest.fixture
+def autocomplete_funcs(monkeypatch):
+    """Patch the books module's `func` so autocomplete works without pg_trgm."""
+    monkeypatch.setattr("app.api.books.func", _SqliteFunc())
+
+
+class TestBookAutocomplete:
+    """Autocomplete suggestions — pg_trgm emulated via _SqliteFunc for SQLite."""
+
+    def test_autocomplete_basic_title_match(
+        self, client, sample_books, autocomplete_funcs
+    ):
+        """Typing a title fragment returns the matching book with title, author, cover."""
+        response = client.get("/api/v1/books/autocomplete", params={"q": "Harry"})
+        assert response.status_code == 200
+        suggestions = response.json()["suggestions"]
+        assert len(suggestions) == 1
+        assert suggestions[0]["title"] == "Harry Potter and the Sorcerer's Stone"
+        assert suggestions[0]["author"] == "J.K. Rowling"
+        assert "cover_url" in suggestions[0]
+
+    def test_autocomplete_matches_author(
+        self, client, sample_books, autocomplete_funcs
+    ):
+        """Author name fragments produce suggestions (US-2 / blocker B1)."""
+        response = client.get("/api/v1/books/autocomplete", params={"q": "Rowling"})
+        assert response.status_code == 200
+        suggestions = response.json()["suggestions"]
+        assert len(suggestions) == 1
+        assert suggestions[0]["author"] == "J.K. Rowling"
+
+    def test_autocomplete_ranks_title_exact_above_author_match(
+        self, client, autocomplete_funcs
+    ):
+        """GREATEST(similarity(title), similarity(author)) ranks title-exact above author-only."""
+        db = TestingSessionLocal()
+        db.add_all(
+            [
+                Book(
+                    id=uuid.uuid4(),
+                    title="Harry Potter and the Sorcerer's Stone",
+                    author="J.K. Rowling",
+                ),
+                Book(
+                    id=uuid.uuid4(),
+                    title="Rowling",
+                    author="Someone Else",
+                    cover_url="https://example.com/rowling.jpg",
+                ),
+            ]
+        )
+        db.commit()
+        db.close()
+
+        response = client.get("/api/v1/books/autocomplete", params={"q": "Rowling"})
+        assert response.status_code == 200
+        suggestions = response.json()["suggestions"]
+        assert len(suggestions) == 2
+        # Title-exact (1.0) beats author-substring (0.7).
+        assert suggestions[0]["title"] == "Rowling"
+        assert suggestions[1]["title"].startswith("Harry")
+        assert suggestions[0]["cover_url"] == "https://example.com/rowling.jpg"
+
+    def test_autocomplete_respects_limit_5(self, client, autocomplete_funcs):
+        """At most 5 suggestions are returned even when more books match."""
+        db = TestingSessionLocal()
+        db.add_all(
+            [
+                Book(id=uuid.uuid4(), title=f"Common Title {i}", author="Shared Author")
+                for i in range(10)
+            ]
+        )
+        db.commit()
+        db.close()
+
+        response = client.get("/api/v1/books/autocomplete", params={"q": "common"})
+        assert response.status_code == 200
+        suggestions = response.json()["suggestions"]
+        assert len(suggestions) == 5
+        # Secondary ordering is deterministic: title ASC.
+        titles = [s["title"] for s in suggestions]
+        assert titles == sorted(titles)
+
+    def test_autocomplete_short_query_returns_empty(
+        self, client, sample_books, autocomplete_funcs
+    ):
+        """Queries shorter than 2 characters return an empty suggestion list."""
+        response = client.get("/api/v1/books/autocomplete", params={"q": "h"})
+        assert response.status_code == 200
+        assert response.json()["suggestions"] == []
+
+    def test_autocomplete_trims_whitespace(
+        self, client, sample_books, autocomplete_funcs
+    ):
+        """Surrounding whitespace is ignored."""
+        response = client.get("/api/v1/books/autocomplete", params={"q": "  harry  "})
+        assert response.status_code == 200
+        suggestions = response.json()["suggestions"]
+        assert len(suggestions) == 1
+        assert suggestions[0]["title"].startswith("Harry")
+
+    def test_autocomplete_no_match_returns_empty(
+        self, client, sample_books, autocomplete_funcs
+    ):
+        """A query matching nothing returns an empty suggestion list."""
+        response = client.get("/api/v1/books/autocomplete", params={"q": "zzzxxx"})
+        assert response.status_code == 200
+        assert response.json()["suggestions"] == []
+
+    def test_autocomplete_requires_no_auth(
+        self, client, sample_books, autocomplete_funcs
+    ):
+        """Autocomplete is public — no auth token required."""
+        response = client.get("/api/v1/books/autocomplete", params={"q": "Hobbit"})
+        assert response.status_code == 200
+        assert response.json()["suggestions"]

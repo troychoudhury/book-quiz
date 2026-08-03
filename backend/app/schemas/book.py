@@ -1,9 +1,11 @@
 """Book-related Pydantic schemas."""
+
 from pydantic import BaseModel
 
 
 class BookSummary(BaseModel):
     """Summary of a book for list/search views."""
+
     id: str
     title: str
     author: str
@@ -18,6 +20,7 @@ class BookSummary(BaseModel):
 
 class BookDetail(BookSummary):
     """Detailed book information."""
+
     description: str | None = None
     chapters: int = 0
     total_questions: int = 0
@@ -27,7 +30,25 @@ class BookDetail(BookSummary):
 
 class BookSearchResponse(BaseModel):
     """Paginated search response."""
+
     items: list[BookSummary]
     total: int
     page: int
     size: int
+
+
+class AutocompleteSuggestion(BaseModel):
+    """A single autocomplete suggestion — slim, no isbn/age_range/question_count."""
+
+    id: str
+    title: str
+    author: str
+    cover_url: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class AutocompleteResponse(BaseModel):
+    """Response for the autocomplete endpoint."""
+
+    suggestions: list[AutocompleteSuggestion]

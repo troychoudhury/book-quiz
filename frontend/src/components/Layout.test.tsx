@@ -1,35 +1,37 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 
 import Layout from '../components/Layout';
 
-describe('Layout', () => {
-  it('renders the book quiz logo', () => {
-    render(
+function renderLayout() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
       <MemoryRouter>
         <Layout />
-      </MemoryRouter>,
-    );
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+describe('Layout', () => {
+  it('renders the book quiz logo', () => {
+    renderLayout();
     expect(screen.getByRole('link', { name: /book quiz/i })).toBeInTheDocument();
   });
 
   it('renders login and sign up links for guests', () => {
-    render(
-      <MemoryRouter>
-        <Layout />
-      </MemoryRouter>,
-    );
+    renderLayout();
     expect(screen.getByRole('link', { name: /log in/i })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /sign up/i })).toBeInTheDocument();
   });
 
   it('renders a search input', () => {
-    render(
-      <MemoryRouter>
-        <Layout />
-      </MemoryRouter>,
-    );
+    renderLayout();
     expect(screen.getByLabelText('Search books')).toBeInTheDocument();
   });
 });

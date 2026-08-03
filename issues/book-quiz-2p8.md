@@ -458,7 +458,50 @@ All changes additive, no existing endpoints modified. Route ordering correctly i
 
 ## Implementation Notes
 
-*Pending engineer delegation.*
+**Implemented by**: Senior Software Engineer | **Date**: 2026-08-03
+
+### Changed files
+
+| # | File | Change |
+|---|------|--------|
+| 1 | `backend/app/schemas/book.py` | Added `AutocompleteSuggestion` + `AutocompleteResponse` (from_attributes) |
+| 2 | `backend/app/api/books.py` | Added `GET /books/autocomplete` (registered BEFORE `/{book_id}`); imported `func`; no auth |
+| 3 | `backend/tests/acceptance/test_book_search.py` | Added `TestBookAutocomplete` — 8 tests using a patched `func` for SQLite |
+| 4 | `frontend/src/types/index.ts` | Added `AutocompleteSuggestion` / `AutocompleteResponse` interfaces |
+| 5 | `frontend/src/services/api.ts` | Added `booksApi.autocomplete(q)` |
+| 6 | `frontend/src/hooks/useDebounce.ts` | NEW — generic debounce hook (300ms, cleanup on unmount) |
+| 7 | `frontend/src/hooks/useAutocomplete.ts` | NEW — React Query `useQuery`, `enabled` when trimmed query ≥ 2 chars, `useMemo`-wrapped return (R4) |
+| 8 | `frontend/src/components/SearchBar.tsx` | NEW — shared combobox (hero/header variants, keyboard nav, ARIA, dropdown states) |
+| 9 | `frontend/src/components/SearchBar.test.tsx` | NEW — 8 Vitest tests (debounce, <2 chars, Escape, keyboard nav, Enter→search, empty, error, variants) |
+| 10 | `frontend/src/pages/LandingPage.tsx` | Replaced inline search form with `<SearchBar variant="hero" autoFocus />` (I3) |
+| 11 | `frontend/src/components/Layout.tsx` | Replaced inline search form with `<SearchBar variant="header" />` — no submit button (I2) |
+| 12 | `frontend/src/components/Layout.test.tsx` | Updated — wraps render in `QueryClientProvider` (SearchBar uses React Query) |
+
+### Key decisions
+
+1. **B1 (blocker) — author matching**: Ranking uses `GREATEST(similarity(title, q), similarity(author, q)) DESC, title ASC`, with `WHERE similarity(title, q) > 0 OR similarity(author, q) > 0`. Verified by a test where a title-exact match outranks an author-only match.
+2. **I1 — full ORM query**: `db.query(Book)` (no `with_entities`) so `from_attributes` schema construction works.
+3. **SQLite test strategy**: Chose the plan's *option (b)* — `monkeypatch` of `app.api.books.func` with a dialect-portable stand-in (`_SqliteFunc`: case-based similarity 1.0/0.7/0.0, SQLite scalar `max()` as greatest) instead of `@pytest.mark.skip`. This exercises the real query/response path (WHERE + ORDER BY + LIMIT) in CI/dev on SQLite while production uses real pg_trgm.
+4. **Short-circuit**: `q.strip()` then `len < 2` returns `{"suggestions": []}` with no DB call; `q` param required (422 when missing).
+5. **Debounce on raw value**: `useDebounce` receives the raw query string (identity-stable), trimming happens inside `useAutocomplete` — avoids resetting the debounce timer on every render from a fresh `trim()` string.
+6. **R3 — click race**: suggestion items use `onMouseDown` + `preventDefault()`, so input blur is suppressed and the dropdown closes immediately on genuine outside clicks (no 150ms blur delay).
+7. **R5 — mobile positioning**: `window.visualViewport` listeners (resize/scroll) recompute whether the input sits in the bottom half of the visible viewport; when it does, the dropdown renders above the input (`bottom: 100%`) to clear the on-screen keyboard. Falls back to below-input on desktop where `visualViewport` is unavailable.
+8. **R4 — memoization**: `useAutocomplete` return wrapped in `useMemo`.
+9. **Error state**: dropdown closes silently, input border flashes amber for 800ms; typing is never interrupted.
+10. **Enter behavior**: with a highlighted suggestion → `/books/:id`; otherwise → `/search?q=...` (existing flow). Escape closes and preserves text; Tab closes.
+
+### Deferred (explicitly out of scope for this issue)
+
+- **S2 — rate limiting** on the public autocomplete endpoint (30/min per IP): NOT added — not in the issue's scope boundary; noted as residual risk for a follow-up.
+- **R6 — Playwright E2E** for autocomplete: NOT added — E2E needs the full stack; noted for follow-up. (Existing `landing-page.spec.ts` contract is preserved: placeholder matches `/search|book/i` and Enter still navigates to `/search?q=...`; note that two search inputs now both match that placeholder, which was already true before this change.)
+- **S1 — GIN index vs seq scan**: `similarity()` in ORDER BY forces a seq scan, acceptable for ~1,200 rows (sub-ms), as the plan already documents.
+
+### Pre-existing issues found (not introduced by this change)
+
+- **Backend full-suite test isolation**: each acceptance test module overrides `app.dependency_overrides[get_db]` at import time; when `pytest tests/` runs all modules, the alphabetically last module's engine wins and DB-touching tests in other modules fail with `sqlite3.OperationalError: no such table: books`. Baseline (before this change): **26 failed / 50 passed** on the full suite. Every module passes in isolation (e.g., `test_book_search.py`: 22/22). My 8 new tests pass in isolation; 7 of them exhibit the same pre-existing contamination in the full-suite run. Fixing it (shared conftest / autouse per-module override fixtures) touches 4–5 test modules and is out of this issue's scope — recommend a dedicated follow-up.
+- **ruff F401** in `tests/acceptance/test_profile_api.py` and `tests/unit/test_services.py` (unused imports) — pre-existing; this change actually removed one pre-existing F401 (`text` import in `test_book_search.py`).
+- **prettier drift** in `frontend/src/pages/ProfilePage.tsx` — pre-existing, untouched.
+- **mypy error** in `app/worker.py` (`Module "app" has no attribute "tasks"`) — pre-existing, untouched.
 
 ## Code Review
 

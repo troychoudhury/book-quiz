@@ -1,10 +1,18 @@
 """Book search and detail API endpoints."""
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models.book import Book
-from app.schemas.book import BookSearchResponse, BookSummary, BookDetail
+from app.schemas.book import (
+    AutocompleteResponse,
+    AutocompleteSuggestion,
+    BookDetail,
+    BookSearchResponse,
+    BookSummary,
+)
 
 router = APIRouter(prefix="/api/v1/books", tags=["books"])
 
@@ -21,9 +29,7 @@ def search_books(
 
     if q.strip():
         search_term = f"%{q.strip()}%"
-        query = query.filter(
-            (Book.title.ilike(search_term)) | (Book.isbn == q.strip())
-        )
+        query = query.filter((Book.title.ilike(search_term)) | (Book.isbn == q.strip()))
 
     total = query.count()
     offset = (page - 1) * size
@@ -46,18 +52,68 @@ def search_books(
     return BookSearchResponse(items=items, total=total, page=page, size=size)
 
 
+@router.get("/autocomplete", response_model=AutocompleteResponse)
+def autocomplete_books(
+    q: str = Query(
+        ...,
+        min_length=1,
+        description="Autocomplete query (min 2 characters after trimming)",
+    ),
+    db: Session = Depends(get_db),
+):
+    """Return up to 5 book suggestions ranked by title/author similarity.
+
+    Ranking uses GREATEST(similarity(title, q), similarity(author, q)) so a
+    strong match on either field surfaces (blocker B1). Requires PostgreSQL
+    pg_trgm; queries shorter than 2 characters short-circuit without a DB hit.
+    """
+    trimmed = q.strip()
+    if len(trimmed) < 2:
+        return AutocompleteResponse(suggestions=[])
+
+    title_similarity = func.similarity(Book.title, trimmed)
+    author_similarity = func.similarity(Book.author, trimmed)
+
+    books = (
+        db.query(Book)
+        .filter((title_similarity > 0) | (author_similarity > 0))
+        .order_by(
+            func.greatest(title_similarity, author_similarity).desc(), Book.title.asc()
+        )
+        .limit(5)
+        .all()
+    )
+
+    return AutocompleteResponse(
+        suggestions=[
+            AutocompleteSuggestion(
+                id=str(book.id),
+                title=book.title,
+                author=book.author,
+                cover_url=book.cover_url,
+            )
+            for book in books
+        ]
+    )
+
+
 @router.get("/{book_id}", response_model=BookDetail)
 def get_book(book_id: str, db: Session = Depends(get_db)):
     """Get detailed information about a specific book."""
     import uuid
+
     try:
         bid = uuid.UUID(book_id)
     except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid book ID format.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid book ID format."
+        )
 
     book = db.query(Book).filter(Book.id == bid).first()
     if not book:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Book not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Book not found."
+        )
 
     chapters = len(set(q.chapter for q in book.questions)) if book.questions else 0
 

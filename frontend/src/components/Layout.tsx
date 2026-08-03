@@ -1,6 +1,6 @@
-import { useState } from 'react';
 import { Link, Outlet, useNavigate } from 'react-router-dom';
 
+import SearchBar from './SearchBar';
 import { useAuthStore } from '../stores/authStore';
 
 /**
@@ -9,16 +9,7 @@ import { useAuthStore } from '../stores/authStore';
  */
 export default function Layout() {
   const { isAuthenticated, user, logout } = useAuthStore();
-  const [query, setQuery] = useState('');
   const navigate = useNavigate();
-
-  const handleSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = query.trim();
-    if (trimmed) {
-      navigate(`/search?q=${encodeURIComponent(trimmed)}`);
-    }
-  };
 
   const handleLogout = () => {
     logout();
@@ -33,16 +24,9 @@ export default function Layout() {
             📚 Book Quiz
           </Link>
 
-          <form onSubmit={handleSearch} className="flex-1 max-w-md" role="search">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search books..."
-              aria-label="Search books"
-              className="w-full px-4 py-2 border border-gray-300 rounded-full text-sm focus:border-blue-500 focus:outline-none"
-            />
-          </form>
+          <div className="flex-1 max-w-md" role="search">
+            <SearchBar variant="header" />
+          </div>
 
           <nav className="ml-auto flex items-center gap-3">
             {isAuthenticated && user ? (
