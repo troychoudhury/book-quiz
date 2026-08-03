@@ -505,11 +505,193 @@ All changes additive, no existing endpoints modified. Route ordering correctly i
 
 ## Code Review
 
-*Pending code-reviewer delegation.*
+**Reviewer**: Lead Code Reviewer | **Date**: 2026-08-03
+**Verdict**: **CONDITIONAL PASS** — Core functionality is correct, tests pass, and B1 plus all I/R findings are addressed. Four major items recommended before merge: a false "no results" flash, duplicate DOM/ARIA IDs when both SearchBars mount, 3-SELECT-per-request backend query, and a missing loading-state test. None are data-loss or security blockers.
+
+### Verdict rationale
+
+- B1 (blocker) resolved: `WHERE similarity(title) > 0 OR similarity(author) > 0` + `ORDER BY GREATEST(similarity(title), similarity(author)) DESC, title ASC`. Verified in `backend/app/api/books.py:66-82` with dedicated tests (`test_autocomplete_matches_author`, `test_autocomplete_ranks_title_exact_above_author_match`).
+- All plan-review findings addressed: S1 documented/accepted, I1 (full ORM query — see M3 for the performance trade-off), I2 (header has no submit), I3 (`autoFocus` prop), I4 (SQLite stand-in, better than skip), R3 (`onMouseDown` + `preventDefault`), R4 (`useMemo`), R5 (`visualViewport`), S2/R6 explicitly deferred with rationale (residual risks).
+- Verified empirically: backend `test_book_search.py` 22/22 pass in isolation; frontend 11/11 pass; `tsc`, `eslint`, `prettier`, `ruff` all clean.
+
+---
+
+### 🔴 Critical
+
+*None.*
+
+---
+
+### 🟡 Major
+
+- **M1 — False "No matching books found" state during the debounce window** — `frontend/src/components/SearchBar.tsx:232-256`
+  - The dropdown's empty branch renders whenever `!isLoading && suggestions.length === 0`. During the 300ms debounce window after the query crosses 2 characters (and throughout continuous typing, since the debounced value only advances 300ms after the last keystroke), `isLoading` is false and there is no data yet, so the *false* empty message is shown **before any API call has been made**. Empirically confirmed with a scratch Vitest test (`EMPTY-STATE-VISIBLE-DURING-DEBOUNCE: true` immediately after typing "ha", with `booksApi.autocomplete` not yet called). The spec reserves "No matching books found" for the case where the API actually returned zero results.
+  - Fix: expose a settled/fetched flag from `useAutocomplete` (React Query `isFetched` or `status === 'success'`) and render the empty state only when `isFetched && !isLoading && suggestions.length === 0`. Same flag gates the spinner branch.
+- **M2 — Duplicate DOM IDs / broken ARIA wiring on the landing page** — `frontend/src/components/SearchBar.tsx:185,216`
+  - Both the header SearchBar (Layout) and hero SearchBar (LandingPage) are mounted simultaneously on `/` and hardcode `id="search-autocomplete-listbox"` and `id="suggestion-{index}"`. When both dropdowns are open, duplicate IDs exist (invalid HTML); each input's `aria-controls`/`aria-activedescendant` can reference the *other* instance's nodes. Screen-reader/keyboard navigation becomes ambiguous.
+  - Fix: generate instance-scoped IDs with React `useId()` (e.g., `` `${listboxId}-suggestion-${index}` ``).
+- **M3 — Autocomplete endpoint issues 3 SELECTs per request (design deviation)** — `backend/app/api/books.py:66-82`
+  - `db.query(Book)` loads all columns and, because `Book.questions` and `Book.quiz_attempts` are `lazy="selectin"`, triggers two additional eager-load SELECTs (`FROM questions WHERE book_id IN (...)`, `FROM quiz_attempts WHERE book_id IN (...)`) on every request — verified via SQL echo. The plan (§2.1 item 5) explicitly required selecting only `id, title, author, cover_url` for a lightweight, <100ms p95 endpoint. Not a correctness bug at 1,200 rows, but it loads unused data (all questions/attempts for up to 5 books).
+  - Fix: `db.query(Book.id, Book.title, Book.author, Book.cover_url)` with manual `AutocompleteSuggestion(...)` construction (same pattern as the existing `search_books` endpoint), or add `.options(noload(Book.questions), noload(Book.quiz_attempts))` + `load_only(...)`.
+- **M4 — Missing test for the Loading-state acceptance scenario** — `frontend/src/components/SearchBar.test.tsx`
+  - The Gherkin "Loading state" scenario (spinner row while the request is in flight) has no test; the `isLoading && suggestions.length === 0` branch is untested. Also untested: ArrowUp wrap-around, `aria-expanded` value, debounce burst (multiple rapid keystrokes → exactly one API call, listed in the plan's test strategy), and `visualViewport` upward positioning. 8 tests cover the main flows well; these are the gaps.
+
+---
+
+### 🟢 Minor
+
+- **N1 — Escape does not blur the input** (`SearchBar.tsx:139-143`): plan spec table said "close dropdown, preserve text, blur input"; implementation closes and preserves text but keeps focus. Arguably better UX, but an undocumented deviation.
+- **N2 — Stale suggestions shown during debounce lag** (`SearchBar.tsx:34`, `useAutocomplete.ts:26-33`): while typing, the previous debounced query's cached results render for up to 300ms until the new query resolves. Transient and standard typeahead trade-off; consider blanking the list while the typed and debounced values differ.
+- **N3 — No `aria-live` announcement for results/empty changes**: loading spinner has `role="status"`, but arrival of results or the empty message is not announced to screen readers. Add `aria-live="polite"` (or `role="status"`) to the listbox container.
+- **N4 — Test hygiene**: `SearchBar.test.tsx` "does not call the API for queries under 2 characters" uses a bare `await new Promise(setTimeout(350))`, producing an `act(...)` warning. Use fake timers (`vi.useFakeTimers()`) or `waitFor`.
+- **N5 — Backend test gaps**: no test for missing `q` → 422, and no `max_length` bound on `q` (aligns with Security Audit M2). Suggest `max_length=200` server-side and `maxLength={200}` on the input as defense-in-depth.
+- **N6 — SQLite emulation divergence (I4)**: `_SqliteFunc` maps any substring to 0.7 flat, so the ranking test validates the emulated model, not real pg_trgm distribution. Acknowledged trade-off; a PostgreSQL-backed CI job would close the gap (deferred — residual risk).
+
+---
+
+### ✅ Praise
+
+- B1 author matching implemented exactly as prescribed, with `GREATEST(...)` composite ranking and deterministic `title ASC` tie-break; dedicated tests prove both author matching and ranking.
+- R3 handled properly: `onMouseDown` + `preventDefault` on options eliminates the blur/click race without the 150ms delay hack; genuine outside clicks close immediately.
+- R4 (useMemo bundle), R5 (visualViewport with desktop fallback), I2 (header without submit), I3 (autoFocus) all implemented as planned.
+- I4 handled better than the plan's fallback: the `_SqliteFunc` stand-in exercises the real WHERE/ORDER BY/LIMIT path in CI instead of skipping.
+- Debounce receives the raw (identity-stable) value; trimming happens inside the hook, so the timer isn't reset on every render; the React Query key is the trimmed query.
+- ARIA combobox pattern is largely correct: `role="combobox"`, `aria-expanded`, `aria-autocomplete="list"`, `aria-controls`, `aria-activedescendant`, `role="listbox"`/`option`, `aria-selected`, `autoComplete="off"`.
+- Error handling matches the spec: silent close, amber border flash with timer cleanup on unmount, typing never interrupted.
+- Backend hygiene: short-circuit for <2 chars avoids a DB hit, parameterized query (no injection surface), route registered before `/{book_id}`, no auth per spec, `q` required → 422 when absent.
+- Tests: 8 backend acceptance tests (passing in isolation, 22/22 in module) and 8 frontend component tests (11/11 including updated Layout tests) with React Query mocked properly (`retry: false`).
+
+---
+
+### Residual Risks (deferred by design, documented in Implementation Notes)
+
+- **S2 / Security M1** — no `@limiter.limit("30/minute")` on the public endpoint. Verified that slowapi's global `default_limits` (60/min, `memory://` storage) *does* apply to undecorated routes, so there is baseline throttling, but it is weaker than the plan's recommendation and not multi-worker consistent. One-line fix when the follow-up lands.
+- **R6** — no Playwright E2E for autocomplete; existing `landing-page.spec.ts` contract (placeholder regex `/search|book/i`) is preserved, and the two-matching-inputs situation is pre-existing (both header and hero inputs matched before this change).
+- **S1** — GIN index cannot accelerate `ORDER BY similarity(...)`; seq scan on ~1,200 rows is sub-ms, accepted as documented.
+
+---
+
+### Review Commands Run
+
+| Command | Result |
+|---------|--------|
+| `pytest tests/acceptance/test_book_search.py` (isolation) | ✅ 22 passed |
+| `pytest tests/` (full suite) | ⚠️ 33 failed / 51 passed — pre-existing module-isolation contamination (parent commit: 26 failed / 50 passed; delta is exactly the 7 new autocomplete tests failing from the same root cause + 1 new short-query test passing) |
+| `vitest run` (frontend) | ✅ 11 passed (8 SearchBar + 3 Layout) |
+| `tsc -b` | ✅ clean |
+| `eslint` (changed files) | ✅ clean |
+| `prettier --check` (changed files) | ✅ clean |
+| `ruff check` (changed backend files) | ✅ clean |
+| SQL echo trace of autocomplete query | ⚠️ 3 SELECTs per request (M3) |
+| Scratch test for debounce-window empty state | ⚠️ false empty state reproduced (M1) |
+
 
 ## Security Audit
 
-*Pending security-auditor delegation.*
+**Auditor**: Security Auditor | **Date**: 2026-08-03
+**Verdict**: **PASS** — No critical or high-severity findings. Two medium-severity items flagged for follow-up.
+
+### 🛡️ Security Audit Report
+
+**Scope**: `backend/app/api/books.py` (autocomplete endpoint), `frontend/src/components/SearchBar.tsx` (typeahead UI), `frontend/src/hooks/useAutocomplete.ts`, `frontend/src/hooks/useDebounce.ts`, `frontend/src/services/api.ts`, autocomplete integration surface.
+
+**Risk Level**: **Medium** (2 medium findings, 0 critical, 0 high)
+
+---
+
+#### 🔴 Critical Findings (Blockers)
+
+*None.*
+
+---
+
+#### 🟠 High Severity
+
+*None.*
+
+---
+
+#### 🟡 Medium Severity
+
+- **M1 — Rate-limiting gap on public autocomplete endpoint**
+  - **Location**: `backend/app/api/books.py:55` — no `@limiter.limit()` decorator
+  - **Impact**: The endpoint relies solely on the global slowapi default of 60 req/min per IP (set in `app/core/security.py:17-22`). At 60 req/min, an attacker can enumerate the entire 1,200-book catalog by title prefix in ~20 minutes. Additionally, the limiter storage is `memory://`, so in a multi-worker production deployment each worker maintains independent counters — an attacker spreading requests across connections could multiply their effective rate. The plan review (S2) recommended 30 req/min; this was explicitly deferred.
+  - **Remediation**: Apply `@limiter.limit("30/minute")` on `autocomplete_books`. Upgrade storage to Redis (`storage_uri=settings.redis_url`) for multi-worker consistency. Both are one-line changes.
+
+- **M2 — No maximum length constraint on query parameter**
+  - **Location**: `backend/app/api/books.py:57-61` — `q: str = Query(..., min_length=1)` has no `max_length`
+  - **Impact**: An attacker can submit arbitrarily long query strings (e.g., 10KB+). While SQLAlchemy parameterization prevents SQL injection, `pg_trgm.similarity()` computation cost scales with input length. Very long inputs could degrade database performance or consume server memory. The frontend `<input>` has no `maxLength` attribute either, so the constraint must be server-side.
+  - **Remediation**: Add `max_length=200` to the Query parameter. This is sufficient for any realistic book title/author search and caps DB load. Also add `maxLength={200}` on the `<input>` in `SearchBar.tsx` as defense-in-depth.
+
+---
+
+#### 🟢 Low Severity / Recommendations
+
+- **L1 — `cover_url` rendered directly in `<img src>` without URL validation**
+  - **Location**: `frontend/src/components/SearchBar.tsx:194` — `<img src={suggestion.cover_url} ... />`
+  - **Impact**: React 18 blocks `javascript:` URLs in `src`. However, if a malicious `cover_url` were ever introduced into the database (e.g., via admin panel compromise or future user-uploaded covers), it could reference external tracking pixels for user fingerprinting or display offensive content. **Risk is LOW** because cover URLs originate from a controlled OpenLibrary import pipeline, not user input.
+  - **Remediation**: Validate that `cover_url` starts with `https://` before rendering. Consider adding `referrerpolicy="no-referrer"` and `loading="lazy"` attributes to the `<img>` tag.
+
+- **L2 — In-memory rate limiter storage unsuitable for production**
+  - **Location**: `backend/app/core/security.py:20` — `storage_uri="memory://"`
+  - **Impact**: In a multi-worker deployment (e.g., `uvicorn --workers 4`), each worker has its own rate-limit counter. An attacker can multiply their effective rate by the worker count. Not exploitable in the current single-worker dev setup, but a latent production risk.
+  - **Remediation**: When Redis is available, set `storage_uri=settings.redis_url`. The infrastructure already provisions Redis (`docker-compose.yml`).
+
+- **L3 — No `Cache-Control` header on autocomplete responses**
+  - **Location**: `backend/app/api/books.py:55` — response headers do not include cache directives
+  - **Impact**: Browsers or intermediate proxies may cache autocomplete JSON. Since the data is non-sensitive (public book catalog), this is low risk, but shared-cache environments (corporate proxies, CDNs) could serve stale or cross-user data. Not a confidentiality issue given the public nature of the data.
+  - **Remediation**: Add `Cache-Control: private, max-age=30` to the response or let the existing middleware handle it if appropriate.
+
+---
+
+#### ✅ Clean Areas
+
+- **SQL Injection**: Confirmed safe. All database queries in both `/autocomplete` (line 73-82) and `/books` (line 31-32) use SQLAlchemy ORM parameterized queries. No raw SQL, no `text()` constructs, no string interpolation into SQL.
+- **XSS in suggestion rendering**: Confirmed safe. React auto-escapes `{suggestion.title}` and `{suggestion.author}` as text nodes. No `dangerouslySetInnerHTML` usage.
+- **URL manipulation**: Confirmed safe. `encodeURIComponent` applied to search query (line 107). React Router `navigate()` does path-only routing — no open redirect. Book IDs are server-generated UUIDs.
+- **Authentication bypass**: Not applicable. The endpoint is intentionally public per specification ("No authentication required"). The data exposed is non-sensitive catalog metadata.
+- **Secret hygiene**: Confirmed clean. No hardcoded API keys, tokens, or credentials in the changed source files. `.env` is gitignored (verified: not tracked by git). Test files use obviously fake test keys (`"sk-test-key"`, `"SecurePass123!"`).
+- **Security headers**: Already enforced by `main.py` middleware (X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy, HSTS in production). Nginx CSP (`nginx.conf:16`) allows `img-src https:` which is correct for OpenLibrary cover URLs.
+- **Error handling**: Confirmed safe. Generic exception handler in `main.py` suppresses internal details in production. Autocomplete errors fail silently on the frontend (dropdown closes, amber flash) — no error details leaked to the user.
+- **Debounce & client-side DoS**: Confirmed safe. 300ms debounce plus `enabled: trimmedQuery.length >= 2` in `useAutocomplete.ts` prevents rapid-fire API calls from keystroke floods. React Query cancels stale in-flight requests.
+- **Auth endpoints**: Rate limiting properly configured on `/auth/register` (5/hour), `/auth/login` (5/minute), `/auth/refresh` (10/minute). Not affected by this change.
+
+---
+
+#### 📦 Dependency Status
+
+| Package | Version | Status |
+|---------|---------|--------|
+| `fastapi` | 0.141.1 | Current; no known CVEs |
+| `sqlalchemy` | 2.0.51 | Current; no known CVEs |
+| `slowapi` | 0.1.9 | Current; no known CVEs |
+| `python-jose` | 3.5.0 | **ATTENTION**: python-jose is unmaintained (last release 2023). Consider migrating to `PyJWT` 2.x — out of scope for this audit but noted. |
+| `react` | 18.3.1 | Current; XSS protections intact |
+| `axios` | 1.7.9 | Current; no known CVEs |
+| `react-router-dom` | 6.28.0 | Current; no known CVEs |
+
+---
+
+#### 🔍 Pre-existing Issues (not introduced by this change)
+
+- **`python-jose` is unmaintained** (`requirements.txt:17`). The project uses it for JWT operations. The library has no *known* exploitable CVEs but receives no security patches. This is a medium-term supply-chain risk across the entire auth system. Recommend migration to `PyJWT` + `cryptography` in a dedicated issue.
+- **In-memory rate limiter** (`security.py:20`) — pre-existing design choice, not changed by this PR. Noted here because it weakens the already-thin rate limiting on the new endpoint.
+
+---
+
+#### 📊 Summary
+
+| Category | Count |
+|----------|-------|
+| Critical | 0 |
+| High | 0 |
+| Medium | 2 (M1, M2) |
+| Low | 3 (L1, L2, L3) |
+| Info | 2 (pre-existing findings) |
+
+**Overall**: The autocomplete implementation is **security-conscious**. The two medium findings (rate-limiting gap, missing max length) are low-complexity fixes that don't require architectural changes. Both were acknowledged in the plan review and explicitly deferred — they should be addressed in a follow-up before production deployment.
+
+**Pass/Fail**: ✅ **PASS** — No blockers or high-severity findings. Medium items are deferred with clear remediation paths.
 
 ## Test Results
 
