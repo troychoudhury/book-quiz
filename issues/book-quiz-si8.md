@@ -302,3 +302,289 @@ All changes stay within existing module boundaries (`hydration_service.py`, `adm
 ## Test Results
 
 *Pending tester delegation.*
+
+## Code Review
+
+**Reviewer**: Lead Code Reviewer | **Date**: 2026-08-03
+**Verdict**: **CONDITIONAL PASS** — implementation is correct, clean, and matches the approved plan; all verification claims were independently reproduced. Two gaps (T1, T2) should be fixed or explicitly tracked as follow-ups before operational close-out, plus several minor issues. No blockers found.
+
+### Verified Claims (all reproduced)
+
+| Claim | Result |
+|-------|--------|
+| `pytest tests/unit/test_services.py tests/acceptance/test_admin_api.py` → 34 passed | ✅ Reproduced (34 passed, 1 pre-existing starlette deprecation warning) |
+| Full `pytest tests/` → 26 failures / 50 passed | ✅ Reproduced; baseline worktree at `006b67e~1` also shows 26 failed / 39 passed — failures are pre-existing, the change adds 11 passing tests and no regressions |
+| `ruff check` + `ruff format --check` clean on 3 changed files | ✅ Reproduced |
+| `mypy` clean on admin.py + hydration_service.py | ✅ Reproduced |
+| OpenAPI routes registered (hydrate, hydrate-all, 2 status endpoints) | ✅ Confirmed by route inspection |
+
+### Findings
+
+#### 🔴 Critical
+None.
+
+#### 🟡 Major
+
+- **T1 — Core new logic has zero direct test coverage** (`backend/app/services/hydration_service.py`, `backend/tests/`).
+  The heart of the R1 fix — multi-subject iteration in `fetch_top_books_for_age`, per-subject pagination reset, subject-exhaustion fallthrough, and `_subjects_for_age` fallback appending — is exercised by **no** test. Existing unit tests mock a single OpenLibrary response (single subject); the new acceptance tests monkeypatch `fetch_top_books_for_age` entirely, so they verify the endpoint plumbing but never the subject-iteration behavior. Per ADR-005, add unit tests for: (a) first subject exhausted → falls through to second subject; (b) limit spread across multiple subjects; (c) pagination resets to page 1 per subject; (d) `_subjects_for_age` appends the broad fallback only when absent (ages 6 and 12 where the fallback is already primary must not duplicate); (e) dedup-heavy pages terminate early.
+
+- **T2 — Worker crash leaves task stuck in `processing` forever, wedging the admin API** (`backend/app/api/admin.py:186-217`, `_run_hydrate_all`).
+  If `SessionLocal()` or `HydrationService.__init__` raises (e.g., DB unavailable at start), the exception propagates out of the worker before the per-grade try/except is entered. The task stays `status == "processing"` indefinitely, and because the 409 concurrency guard blocks on *any* processing task, **every future `POST /hydrate-all` returns 409 until process restart** (reproduced: worker crash → status endpoint returns 200/"processing"; subsequent hydrate-all → 409). Additionally, the exception is silently dropped by the `done_callback` (`_background_tasks.discard`) — it is never retrieved or logged ("Task exception was never retrieved"). Fix: wrap the worker body (after task lookup) in try/except, mark the task `failed` with the error, and log from the callback or retrieve the exception.
+
+#### 🟢 Minor
+
+- **M1 — `GET /hydrate-all/{task_id}/status` with a sync-`/hydrate` task id → unhandled `KeyError: 'grades'` → 500** (`backend/app/api/admin.py:292`). Reproduced. The two status endpoints share one in-memory task store but each assumes its own shape. Return 404 (or 400 "not a hydrate-all task") when `"grades"` is absent. The reverse direction (hydrate-all task queried via `/hydrate/{id}/status`) works because the response model only reads common keys.
+
+- **M2 — Partial-failure accounting undercounts** (`hydration_service.py` `fetch_top_books_for_age` + `admin.py` `_run_hydrate_all`). If a grade fails mid-fetch (network error on page 3), books already stored to the DB for that grade are not reflected in `books_processed` (grade entry stays 0). Cosmetic for a one-time load, but the status output would disagree with `SELECT count(*)` per age. Consider capturing partial counts from the raised exception or accepting the discrepancy with a comment.
+
+- **M3 — Dedup-heavy pages are scanned to exhaustion** (`hydration_service.py:136-148`). The inner loop only breaks on an empty `docs` page; a page full of already-stored ISBNs (common for grades sharing `young_adult_fiction` / `juvenile_fiction` primaries) pages through all 10 pages without early exit. Not a correctness bug — bounded (≤10 pages/subject) — just wasted API calls. Break when a page yields 0 *new* books.
+
+- **M4 — `_tasks` never pruned** (`admin.py`). Completed/failed tasks accumulate for the process lifetime. Acceptable for a one-time load (S2 documented), but the store will grow without bound across repeated runs. Add a cap/TTL or prune-on-read for hygiene.
+
+- **M5 — `docs/API_DESIGN.md` not updated** with the new `POST /admin/hydrate-all` and `GET /admin/hydrate-all/{task_id}/status` contracts, despite the plan citing API_DESIGN.md as the admin endpoint contract. Document the endpoints (request/response schemas, 409 semantics, 202 background behavior).
+
+- **M6 — Commit-per-book** in `_store_book` (`hydration_service.py:209-213`): 100 commits + refreshes per grade, ~1,200 total. Pre-existing pattern; fine at this scale (ADR-002), but a single flush+commit per subject page would cut ~1,000 round-trips for free. Optional.
+
+- **M7 — ISBN-10 check digits ending in "X" are discarded** by `_extract_isbn` (`clean.isdigit()`); pre-existing. Minor metadata loss, not a correctness regression.
+
+### Adherence to Plan / Deviations
+
+- ✅ `OPENLIBRARY_SUBJECTS` → `dict[int, list[str]]` with the 26 verified subjects — matches plan table exactly.
+- ✅ `GRADE_AGE_MAP` (1→6 … 12→17) matches plan.
+- ✅ Multi-subject fetch with per-subject pagination reset and exhausted-subject fallthrough.
+- ✅ Broad-subject fallback appended per plan mitigation (`juvenile_fiction` ≤12, `young_adult_fiction` ≥13, deduped against existing list).
+- ✅ `HydrateAllRequest` with `ge/le` bounds + `end_grade >= start_grade` model validator (correct pydantic v2 `model_validator(mode="after")` idiom).
+- ✅ R2 blocker resolved: `async def` endpoint → 202 immediately → `asyncio.create_task(asyncio.to_thread(_run_hydrate_all, task_id))` with strong-ref set + `done_callback` discard. Correct pattern; connection never held for the 30–60s job.
+- ✅ S3 blocker resolved: 409 guard covers both hydrate-all and the synchronous hydrate path (sync path holds `processing` while running).
+- ✅ Fresh `SessionLocal()` in the worker thread, documented in the docstring (correct — request-scoped session dies with the 202).
+- ✅ Per-grade status with partial-failure semantics (task `failed` only if every grade failed); S1 comment added; S2 limitation documented; D1 (`fetch_books_for_grade`) correctly omitted as dead code.
+- ✅ Documented deviations are all reasonable: age 18 added to the map (preserves pre-existing coverage, only verified subjects reused); `asyncio.to_thread` over `run_in_executor` (equivalent, less boilerplate); TestClient context-manager fixture with a well-explained starlette portal rationale.
+
+### Test Coverage Assessment
+
+- ✅ Strong endpoint-level acceptance coverage: auth (401/422), defaults (1–12, 100/grade), inverted range, out-of-bounds bounds, immediate 202, per-grade breakdown + aggregates, 409 concurrency (using a blocking fetch + threading.Event — clever and deterministic), 400/404 for status lookups.
+- ⚠️ Gaps: T1 (service-level multi-subject logic) and T2-adjacent (worker-init crash, all-grades-fail → task `failed` path, partial failure where one grade fails and the task stays `completed` with errors surfaced — the per-grade `error` field is asserted only as `None` in the happy path). The all-grades-fail branch (`total == 0 and errors`) and the grade-failure branch have no tests.
+
+### Edge Cases & Error Handling
+
+- `limit` arithmetic (`min(50, limit - len(stored))`) is safe: the while condition guarantees ≥1.
+- Subject names with apostrophes (`children's_stories`) are URL-encoded by httpx automatically.
+- Cross-grade dedup works because `_get_existing_isbns()` is re-queried per grade call (per plan).
+- Age 18 reachable only via the legacy `/hydrate` endpoint; `GRADE_AGE_MAP` output (6–17) is fully covered by the subject map.
+- Residual: `_tasks` cross-thread mutation relies on CPython GIL atomicity for individual dict ops — safe in practice, worth a one-line comment. Multi-worker uvicorn would duplicate the guard per-process (cross-worker double-hydration possible, mitigated by ISBN dedup).
+
+### ✅ Praise
+
+- The 409-concurrency acceptance test (blocking fetch + threading.Event) is a model of deterministic async testing.
+- The TestClient context-manager discovery (starlette per-request portal shutdown cancelling background tasks) is a subtle, well-documented fix that would have cost hours of flaky-test debugging.
+- `_subjects_for_age` fallback dedup logic (avoiding a duplicate primary) shows careful attention to the plan's mitigation detail.
+- Clean separation: service stays API-agnostic; background execution, task bookkeeping, and per-grade status live in the router layer.
+- All plan-review findings (R1, R2, S1–S3, D1–D3) are addressed or explicitly dispositioned in the implementation notes.
+
+```acceptance-report
+{
+  "criteriaSatisfied": [
+    {
+      "id": "criterion-1",
+      "status": "satisfied",
+      "evidence": "Code review findings written to issues/book-quiz-si8.md under '## Code Review': 0 critical, 2 major (T1: multi-subject fetch logic untested; T2: worker-init crash leaves task stuck 'processing' blocking all future hydrate-all with 409 — both reproduced), 7 minor, each with file paths, line refs, severity, and concrete fixes; verification claims (34 tests, ruff, mypy, baseline 26 failures) independently reproduced."
+    }
+  ],
+  "changedFiles": [
+    "backend/app/services/hydration_service.py",
+    "backend/app/api/admin.py",
+    "backend/tests/acceptance/test_admin_api.py",
+    "issues/book-quiz-si8.md"
+  ],
+  "testsAddedOrUpdated": [
+    "backend/tests/acceptance/test_admin_api.py (11 new tests: TestHydrateAllEndpoint x7, TestHydrateAllStatusEndpoint x4)"
+  ],
+  "commandsRun": [
+    {
+      "command": "pytest tests/unit/test_services.py tests/acceptance/test_admin_api.py",
+      "result": "passed",
+      "summary": "34 passed (23 pre-existing + 11 new), 1 starlette deprecation warning"
+    },
+    {
+      "command": "pytest tests/",
+      "result": "failed",
+      "summary": "26 failed / 50 passed — identical failure set reproduced on baseline worktree at 006b67e~1 (26 failed / 39 passed); all 26 failures are pre-existing repo test-pollution, no regressions from this change"
+    },
+    {
+      "command": "ruff check && ruff format --check (3 changed files)",
+      "result": "passed",
+      "summary": "All checks passed; 3 files already formatted"
+    },
+    {
+      "command": "mypy app/api/admin.py app/services/hydration_service.py",
+      "result": "passed",
+      "summary": "Success: no issues found in 2 source files"
+    },
+    {
+      "command": "ad-hoc repro: GET /hydrate-all/{sync-task-id}/status",
+      "result": "failed",
+      "summary": "Confirmed unhandled KeyError 'grades' -> 500 (finding M1)"
+    },
+    {
+      "command": "ad-hoc repro: SessionLocal raises in worker",
+      "result": "failed",
+      "summary": "Confirmed task stuck at 'processing' forever; subsequent hydrate-all returns 409 (finding T2)"
+    }
+  ],
+  "validationOutput": [
+    "34/34 targeted tests pass; full suite 50 passed/26 failed with identical pre-existing failure set on baseline; ruff + mypy clean; both suspected edge cases (wrong-status-endpoint KeyError, worker-crash stuck task) empirically reproduced"
+  ],
+  "residualRisks": [
+    "End-to-end hydration (~1,200 books against live OpenLibrary + PostgreSQL) not executed during code review — runtime verification remains pending per 'Test Results' section; subject slugs were curl-verified at plan-review stage (R1) but the final DB count per grade is unverified",
+    "T1: multi-subject fetch logic (subject fallthrough, pagination reset, limit spread) has no direct unit tests — regression risk on the core R1 fix",
+    "T2: a worker-start failure (e.g., DB down at trigger time) permanently wedges POST /hydrate-all with 409 until restart",
+    "In-memory _tasks store: lost on restart (documented, idempotent) and never pruned — unbounded growth over repeated runs",
+    "Cross-thread mutation of _tasks relies on CPython GIL atomicity; multi-worker uvicorn would bypass the 409 guard across processes (mitigated by ISBN dedup)"
+  ],
+  "noStagedFiles": true,
+  "diffSummary": "Expands OPENLIBRARY_SUBJECTS to dict[int, list[str]] with 26 verified subjects per grade level; adds GRADE_AGE_MAP; reworks fetch_top_books_for_age for multi-subject iteration with per-subject pagination and broad-subject fallback; adds async POST /admin/hydrate-all (202 + asyncio.to_thread worker, 409 concurrency guard, per-grade status tracking) and GET /admin/hydrate-all/{id}/status; adds 11 acceptance tests; documents ADR/scale notes",
+  "reviewFindings": [
+    "major: backend/app/services/hydration_service.py - multi-subject fetch logic has zero direct test coverage (acceptance tests monkeypatch fetch_top_books_for_age); add unit tests for subject fallthrough, pagination reset, fallback append, dedup-heavy pages",
+    "major: backend/app/api/admin.py:_run_hydrate_all - exception before per-grade try (SessionLocal/HydrationService init) leaves task 'processing' forever; 409 guard then blocks all future hydrate-all calls until restart; exception also never retrieved/logged in done_callback",
+    "minor: backend/app/api/admin.py:292 - GET /hydrate-all/{id}/status with a sync-hydrate task id raises unhandled KeyError 'grades' -> 500; return 404 instead",
+    "minor: hydration_service.py - partial-failure accounting: books stored before a mid-grade fetch error not reflected in books_processed",
+    "minor: hydration_service.py - dedup-heavy pages page through all 10 pages without early exit on 0 new books",
+    "minor: admin.py - _tasks never pruned (unbounded growth over repeated runs)",
+    "minor: docs/API_DESIGN.md not updated with the two new hydrate-all endpoint contracts",
+    "minor: hydration_service.py:_store_book - commit-per-book (~1,200 commits for full hydration); batch per page for free",
+    "minor: hydration_service.py:_extract_isbn - ISBN-10 check digits ending in X discarded (pre-existing)",
+    "verdict: CONDITIONAL PASS - no blockers; all plan-review findings (R1/R2/S1-S3/D1-D3) addressed; verification claims independently reproduced"
+  ],
+  "manualNotes": "Review only — no code changes made. Findings and verdict appended to issues/book-quiz-si8.md under '## Code Review'. T1/T2 majors should be fixed or tracked as follow-up beads before operational close-out; runtime hydration verification (~1,200 books in PostgreSQL) is still outstanding per the issue's Test Results section."
+}
+```
+
+## Security Audit
+
+**Auditor**: Senior Security Auditor | **Date**: 2026-08-03
+**Scope**: `backend/app/services/hydration_service.py`, `backend/app/api/admin.py`, `backend/tests/acceptance/test_admin_api.py`
+**Verdict**: 🟠 **CONDITIONAL PASS** — 3 High-severity findings that should be addressed before production deployment. No critical blockers.
+
+---
+
+### 🔴 Critical Findings (Blockers)
+*None identified.*
+
+---
+
+### 🟠 High Severity
+
+- **H1: Error Information Leakage via Task Status Endpoints**
+  - **Location**: `backend/app/api/admin.py:128`, `backend/app/api/admin.py:226`
+  - **Finding**: Both `trigger_hydration` (line 128) and `_run_hydrate_all` (line 226) capture raw `str(e)` from caught exceptions and store them in `_tasks`, which is served verbatim to any caller with the admin key via `GET /admin/hydrate/{task_id}/status` and `GET /admin/hydrate-all/{task_id}/status`. If a database connection fails, `str(e)` may include the full `DATABASE_URL` with embedded credentials (e.g., `postgresql://bookquiz:bookquiz_dev@localhost:5432/bookquiz`). Likewise, httpx or OpenLibrary errors may leak internal network paths, stack traces, or API internals.
+  - **Impact**: An attacker with the admin key (or anyone who can guess a valid task UUID) can extract database credentials, internal network topology, or stack traces that aid further exploitation.
+  - **Remediation**: Sanitize error messages stored in `_tasks` — capture only a generic category (e.g., `"database_error"`, `"openlibrary_api_error"`) and log the full `repr(e)` server-side via `logger.exception(...)`. Never store raw exception strings in user-visible task state. Alternatively, return only an opaque `error_code` and keep details in secure server logs.
+
+- **H2: Race Condition in In-Memory Task Store (No Synchronization)**
+  - **Location**: `backend/app/api/admin.py:19-20` (`_tasks` dict, `_background_tasks` set), `admin.py:169-232` (`_run_hydrate_all`), `admin.py:240-262` (`get_hydration_status`), `admin.py:268-300` (`get_hydrate_all_status`)
+  - **Finding**: The module-level `_tasks` dict is accessed concurrently from two execution contexts: (1) the asyncio event loop (status endpoints via FastAPI route handlers, which are synchronous `def` but run in the event loop's threadpool), and (2) a worker thread spawned by `asyncio.to_thread()` in `trigger_hydrate_all`. While CPython's GIL makes individual dict get/set operations atomic, compound read-modify-write sequences are not. Specifically: the status endpoint iterates `task["grades"].values()` while `_run_hydrate_all` is mutating nested dict entries (`grade_entry["status"] = "processing"`, `grade_entry["books_processed"] = len(books)`). This can cause the status endpoint to see an inconsistent snapshot (e.g., `status == "completed"` but `books_processed == 0`). Additionally, `_background_tasks` is mutated from the done callback which runs in the event loop — simultaneous `discard` and `add` on a `set` can theoretically corrupt it if the GIL is released during a rehash.
+  - **Impact**: Status polls may return inconsistent per-grade data (non-exploitable but breaks API contract). In extreme cases, a `RuntimeError: dictionary changed size during iteration` could crash a status request. The concurrency guard (409 check) on line 149-153 reads `_tasks.values()` under iteration while another thread could be modifying it — a TOCTOU window exists.
+  - **Remediation**: Use `threading.Lock()` to guard all `_tasks` reads and writes. Wrap the status endpoint's dict reads and the background worker's writes with `with _tasks_lock:`. For the 409 concurrency check, hold the lock while iterating.
+
+- **H3: Missing `Cache-Control: no-store` on Admin Status Endpoints**
+  - **Location**: `backend/app/main.py:98-100` (security-headers middleware)
+  - **Finding**: The security-headers middleware only adds `Cache-Control: no-store` for paths starting with `/api/v1/auth`. Admin endpoints (`/api/v1/admin/hydrate/*/status`, `/api/v1/admin/hydrate-all/*/status`) return task status including potentially sensitive metadata (per-grade book counts, error messages) but do not set cache-prevention headers. A shared proxy cache or browser back-button could serve stale task data to a different user.
+  - **Impact**: Task status data (book counts, per-grade breakdown, error details) could be cached by intermediaries and served to unauthorized parties.
+  - **Remediation**: Extend the cache-control condition in `main.py` to include `/api/v1/admin` paths, or add a response-class/route-level decorator on admin status endpoints that sets `Cache-Control: no-store`.
+
+---
+
+### 🟡 Medium Severity
+
+- **M1: Shared Admin Key — No RBAC, No Audit Trail**
+  - **Location**: `backend/app/api/admin.py:31-42`
+  - **Finding**: The admin API uses a single shared secret (`X-Admin-Key` header) with no concept of individual admin identities, role-based access control, or audit logging. There is no record of *who* triggered a hydration job (only that a valid key was supplied). If the admin key is compromised, the attacker gains unrestricted access to all admin operations with no traceability.
+  - **Impact**: No attribution for admin actions; single point of failure for access control; no way to rotate keys without downtime.
+  - **Remediation**: Acceptable for this iteration (single-operator, one-time data load). Before production, consider: (a) logging the source IP and timestamp of admin actions, (b) supporting multiple API keys with individual revocation, or (c) integrating with the existing JWT auth system and adding an `admin` role to user accounts.
+
+- **M2: Admin Key Comparison Susceptible to Timing Side-Channel**
+  - **Location**: `backend/app/api/admin.py:40` — `x_admin_key != settings.admin_api_key`
+  - **Finding**: Python's `!=` on strings short-circuits on the first differing byte, making the comparison time proportional to the length of the common prefix. Over many requests, an attacker can brute-force the admin key one character at a time by measuring response latency.
+  - **Impact**: In theory, an attacker on the same network segment could extract the admin key. In practice, network jitter over WAN makes this attack noisy, but it remains a cryptographic best-practice concern.
+  - **Remediation**: Use `hmac.compare_digest(x_admin_key, settings.admin_api_key)` or `secrets.compare_digest(...)` for constant-time comparison. Low effort, high security hygiene.
+
+- **M3: No Timeout on Background Hydration Task**
+  - **Location**: `backend/app/api/admin.py:157` — `asyncio.create_task(asyncio.to_thread(_run_hydrate_all, task_id))`
+  - **Finding**: The background worker created via `asyncio.to_thread` has no timeout. If `_run_hydrate_all` hangs (e.g., network partition during an httpx call with a 30s timeout that never fires, or an infinite loop from a malformed OpenLibrary response), the task remains "processing" forever with no way to cancel it. The task reference is held in `_background_tasks` and never cleaned up until the done callback fires — which it never will if the thread hangs.
+  - **Impact**: Resource leak (stuck thread). The 409 concurrency guard permanently blocks further hydration attempts.
+  - **Remediation**: Add a `threading.Event` or `asyncio.Event` that signals cancellation. Wrap `_run_hydrate_all` with a maximum wall-clock timeout (e.g., 5 minutes). On timeout, set task status to `failed` with `error: "timeout"`.
+
+- **M4: Per-Book Database Commits — No Transactional Atomicity per Grade**
+  - **Location**: `backend/app/services/hydration_service.py:150-152` (`_store_book` calls `self.db.commit()` per book)
+  - **Finding**: Each book is committed in its own transaction via `self.db.commit()` inside `_store_book`. If a hydration run for a grade fails after storing 50 of 100 books, those 50 books persist but the task reports `grade status: failed` with `books_processed: 0` (since `len(books)` captures only the successful return). This creates a mismatch between what's actually in the database and what the task status reports.
+  - **Impact**: Data consistency gap — a failed grade may have partially stored books that aren't reflected in the task status. A re-run of the same grade would skip those books (ISBN dedup) and store only the remaining ones, which is actually correct behavior, but the status reporting is misleading.
+  - **Remediation**: Either (a) accumulate books in a list and commit once at the end with `self.db.commit()` (providing per-grade atomicity), or (b) update `books_processed` incrementally even on partial success. Option (a) is preferable.
+
+---
+
+### 🟢 Low Severity / Recommendations
+
+- **L1: Unbounded In-Memory Task Store Growth**
+  - **Location**: `backend/app/api/admin.py:19` — `_tasks: dict[str, dict] = {}`
+  - **Finding**: Completed/failed task entries are never evicted from `_tasks`. Over time, repeated hydration calls will cause unbounded memory growth. Mitigated by the fact that this is intended as a one-time load and the process restarts clear memory. Documented in implementation notes as acceptable limitation (S2).
+  - **Remediation**: Add a TTL-based eviction (e.g., remove tasks older than 1 hour) or cap the dict at a maximum size.
+
+- **L2: Database Connection String May Appear in Worker-Thread Error Logs**
+  - **Location**: `backend/app/api/admin.py:225` — `logger.error(f"Hydration failed for grade {grade}: {e}")`
+  - **Finding**: If `SessionLocal()` (line 214) fails to connect because the DB is unreachable, the SQLAlchemy error message includes the connection URL with embedded credentials. This goes to server logs only (not client-facing via the task status since the `except` block on line 222 catches `fetch_top_books_for_age` errors, not session-creation errors). However, if logs are aggregated to a centralized system with broader access, credentials could leak.
+  - **Remediation**: Wrap `SessionLocal()` in a try/except and log a sanitized message (`"Database connection failed"`) rather than letting the raw exception propagate.
+
+- **L3: OpenLibrary Subject Strings Are Hardcoded and Safe**
+  - **Location**: `backend/app/services/hydration_service.py:25-54` (`OPENLIBRARY_SUBJECTS`), `hydration_service.py:125` (httpx `params` usage)
+  - **Finding**: All subject values are hardcoded string constants. They are passed to `httpx.Client.get(params={"subject": subject, ...})`, which properly URL-encodes values. No injection risk. ✅ Verified clean.
+
+- **L4: No SSRF Risk — OpenLibrary URL Is Hardcoded**
+  - **Location**: `backend/app/services/hydration_service.py:88` — `OPENLIBRARY_SEARCH = "https://openlibrary.org/search.json"`
+  - **Finding**: The external URL is a module-level constant, not user-controllable. No SSRF vector. ✅ Verified clean.
+
+---
+
+### ✅ Clean Areas (Passed Inspection)
+
+| Area | Notes |
+|------|-------|
+| **Authentication middleware** (`admin.py:31-42`) | `_verify_admin_key` correctly returns 501 when `admin_api_key` is unconfigured and 401 on mismatch. No bypass vector found. |
+| **Input validation** (`admin.py:48-74`) | Pydantic models enforce `age` (6-18), `limit` (1-500), `start_grade`/`end_grade` (1-12), `books_per_grade` (1-500). `model_validator` enforces `end_grade >= start_grade`. All edge cases covered. |
+| **UUID validation** (`admin.py:180-186`, `admin.py:273-278`) | Task IDs validated via `uuid.UUID()` before dictionary lookup. Invalid UUIDs return 400, not 500. |
+| **Generic exception handler** (`main.py:131-142`) | Differentiates debug vs production. In production, clients see only `{"detail": "An unexpected error occurred."}` — no stack traces or class names. |
+| **Security headers** (`main.py:87-100`) | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, conditional HSTS. Good coverage for non-admin paths. |
+| **Rate limiting** (`main.py:81-86`) | SlowAPI middleware active. Auth endpoints have specific limits (5/hour register, 5/minute login, 10/minute refresh). Global default of 60/minute. |
+| **Password hashing** (`auth_service.py`) | bcrypt with per-password salts via `gensalt()`. No hardcoded secrets. |
+| **JWT implementation** (`auth_service.py`) | `jti` claim for unique token identification, `type` claim to distinguish access/refresh, `sub` claim for user ID. `expected_type` enforcement prevents refresh-token-for-access swap. |
+| **Database session hygiene** (`admin.py:214, 232`) | `_run_hydrate_all` creates a fresh `SessionLocal()` and closes it in `finally`. No request-scoped session leak into background thread. |
+| **No hardcoded secrets** | Grep for API keys, passwords, tokens in `app/` returned zero hits. All secrets read from environment via `pydantic-settings`. |
+| **Admin key not logged** | Request-logging middleware (`main.py:103-118`) logs method/path/status/elapsed only — no headers. Admin key stays out of access logs. |
+
+---
+
+### 📦 Dependency Status (Quick Scan)
+
+| Package | Version | Known Concerns |
+|---------|---------|---------------|
+| `fastapi` | 0.141.1 | Latest patch; no critical CVEs. |
+| `python-jose` | 3.5.0 | ⚠️ **Unmaintained** since 2021. Consider migrating to `PyJWT` (actively maintained) or `authlib`. No known exploitable CVEs in 3.5.0, but no security patches will be issued. |
+| `bcrypt` | 5.0.0 | Latest stable; clean. |
+| `httpx` | 0.28.1 | Slightly behind latest (0.28.x is stable). No critical CVEs. |
+| `sqlalchemy` | 2.0.51 | Recent; no known issues. |
+| `slowapi` | 0.1.9 | Lightweight; no known issues. |
+| `celery` | 5.4.0 | Stable; no critical CVEs in this version. |
+| `starlette` | (transitive via FastAPI) | 1.3.1 per test notes — verify this is patched against CVE-2025-XXXX (path traversal in StaticFiles). Not used in this code path. |
+
+---
+
+### Summary Verdict
+
+| Category | Count |
+|----------|-------|
+| Critical | 0 |
+| High | 3 (H1, H2, H3) |
+| Medium | 4 (M1, M2, M3, M4) |
+| Low | 3 (L1, L2, L3) |
+| Clean | 10 areas |
+
+**Overall**: The implementation is well-structured with good security hygiene (no hardcoded secrets, proper input validation, auth enforcement, secure defaults). The three high-severity findings (error leakage, race condition, missing cache headers) are all fixable with targeted changes and do not represent fundamental design flaws. The `python-jose` deprecation is a medium-term concern. All findings are confined to the admin API surface, which is already behind an authentication gate. **CONDITIONAL PASS** — recommended for merge after H1 (error sanitization) is addressed; H2 and H3 can follow in a fast-follow PR.
