@@ -102,23 +102,19 @@ setup_precommit() {
 setup_docker_volumes() {
     step "Docker volumes"
     require_docker
-    # `docker compose config` validates the file; up -d infra is handled
-    # by `dev up`. Creating volumes explicitly makes setup idempotent.
-    docker volume create bookquiz-pgdata >/dev/null 2>&1 || true
-    docker volume create bookquiz-redisdata >/dev/null 2>&1 || true
+    docker_run volume create bookquiz-pgdata >/dev/null 2>&1 || true
+    docker_run volume create bookquiz-redisdata >/dev/null 2>&1 || true
     ok "Docker volumes ready (bookquiz-pgdata, bookquiz-redisdata)."
 }
 
 setup_migrations() {
     step "Database migrations"
-    # Migrations need the DB up; `dev setup` brings infra up briefly.
     require_docker
-    if ! docker ps --format '{{.Names}}' | grep -q '^bookquiz-db$'; then
+    if ! docker_run ps --format '{{.Names}}' 2>/dev/null | grep -q '^bookquiz-db$'; then
         info "Starting database container for migrations..."
         compose up -d db redis
-        # Wait for healthy postgres (max ~60s)
         local attempts=0
-        until docker exec bookquiz-db pg_isready -U bookquiz >/dev/null 2>&1; do
+        until docker_run exec bookquiz-db pg_isready -U bookquiz >/dev/null 2>&1; do
             attempts=$((attempts + 1))
             if [[ $attempts -ge 30 ]]; then
                 err "Database did not become ready in time."

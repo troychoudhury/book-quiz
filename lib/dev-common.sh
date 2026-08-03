@@ -170,17 +170,70 @@ install_docker() {
     return 1
 }
 
+# Choose the right way to invoke Docker: direct, sg (fresh group), or sudo.
+_docker_cmd() {
+    if docker info >/dev/null 2>&1; then
+        echo "docker"
+    elif command_exists sg && sg docker -c "docker info" >/dev/null 2>&1; then
+        echo "sg docker -c docker"
+    elif sudo docker info >/dev/null 2>&1; then
+        echo "sudo docker"
+    else
+        echo ""
+    fi
+}
+
+# Run a docker command, picking the right method (direct / sg / sudo).
+docker_run() {
+    local cmd
+    cmd="$(_docker_cmd)"
+    if [[ -z "$cmd" ]]; then
+        return 1
+    fi
+    if [[ "$cmd" == "sg docker -c docker" ]]; then
+        sg docker -c "docker $*"
+    else
+        $cmd "$@"
+    fi
+}
+
+# Run docker compose, picking the right method.
+compose_run() {
+    local cmd
+    cmd="$(_docker_cmd)"
+    if [[ -z "$cmd" ]]; then
+        return 1
+    fi
+    if [[ "$cmd" == "sg docker -c docker" ]]; then
+        sg docker -c "docker compose -f ${DEV_ROOT}/docker-compose.yml $*"
+    else
+        $cmd compose -f "${DEV_ROOT}/docker-compose.yml" "$@"
+    fi
+}
+
 require_docker() {
     if ! command_exists docker; then
         warn "Docker is required but not installed."
         if install_docker; then
+            # Try to start the daemon after fresh install
+            if command_exists systemctl; then
+                sudo systemctl start docker 2>/dev/null || true
+            fi
+        else
+            err "Docker installation was not completed. Re-run ./dev setup after installing."
+            exit 1
+        fi
+    fi
+    # Check if Docker works (tries direct → sg → sudo)
+    if ! docker info >/dev/null 2>&1; then
+        if command_exists sg && sg docker -c "docker info" >/dev/null 2>&1; then
+            return 0
+        elif sudo docker info >/dev/null 2>&1; then
             return 0
         fi
-        err "Docker installation was not completed. Re-run ./dev setup after installing."
-        exit 1
-    fi
-    if ! docker info >/dev/null 2>&1; then
-        err "Docker daemon is not running. Start Docker Desktop / dockerd and retry."
+        err "Docker daemon is not running or not accessible."
+        info "Try: sudo systemctl start docker"
+        info "Then: newgrp docker   (or log out and back in)"
         exit 1
     fi
 }
@@ -310,7 +363,17 @@ trap cleanup_stale_pidfiles EXIT
 
 # ── Misc helpers ────────────────────────────────────────────────────
 compose() {
-    docker compose -f "${DEV_ROOT}/docker-compose.yml" "$@"
+    local cmd
+    cmd="$(_docker_cmd)"
+    if [[ -z "$cmd" ]]; then
+        err "Docker is not accessible. Check daemon is running and you are in the docker group."
+        return 1
+    fi
+    if [[ "$cmd" == "sg docker -c docker" ]]; then
+        sg docker -c "docker compose -f ${DEV_ROOT}/docker-compose.yml $*"
+    else
+        $cmd compose -f "${DEV_ROOT}/docker-compose.yml" "$@"
+    fi
 }
 
 confirm() {
