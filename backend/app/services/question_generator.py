@@ -83,6 +83,128 @@ Output format (JSON array):
             self._client = OpenAI(**kwargs)
         return self._client
 
+    def fetch_chapters(
+        self,
+        book_title: str,
+        author: str,
+    ) -> list[dict]:
+        """Ask the AI for a book's chapter list with brief summaries."""
+        if not self.client:
+            return []
+
+        prompt = f"""Book: "{book_title}" by {author}.
+
+List all chapters of this book in order. For each chapter provide:
+- chapter number
+- chapter title
+- one-sentence summary of key events
+
+Output as JSON: {{"chapters": [{{"number": 1, "title": "...", "summary": "..."}}]}}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a literary expert. Output valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.3,
+                max_tokens=8192,
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content
+            if not content:
+                return []
+            data = json.loads(content)
+            return data.get("chapters", [])
+        except Exception as e:
+            logger.error(f"Failed to fetch chapters for '{book_title}': {e}")
+            return []
+
+    def generate_for_book_with_chapters(
+        self,
+        book_title: str,
+        author: str,
+        age_range: str = "",
+    ) -> list[GeneratedQuestion]:
+        """Generate 5 questions per chapter + 5 overall book questions.
+
+        Two API calls:
+        1. Fetch chapter list from AI
+        2. Generate all questions in one call per chapter + overall
+        Falls back to book-level questions if AI doesn't know the chapters.
+        """
+        if not self.client:
+            return []
+
+        chapters = self.fetch_chapters(book_title, author)
+
+        if not chapters or len(chapters) < 2:
+            logger.info(f"Few/no chapters for '{book_title}' — 30 book-level qs")
+            return self.generate_for_book(book_title, author, age_range, num_questions=30)
+
+        age_hint = f" Target age range: {age_range}." if age_range else ""
+        chapter_specs = "\n".join(
+            f"Ch{c['number']}: \"{c['title']}\" — {c['summary']}"
+            for c in chapters
+        )
+        total = len(chapters) * 5 + 5
+
+        prompt = f"""Book: "{book_title}" by {author}.{age_hint}
+
+Chapters:
+{chapter_specs}
+
+Generate EXACTLY 5 questions per chapter + 5 overall questions. Total: {total}.
+Each: 4 choices, one correct. Vary difficulty (30% easy, 40% medium, 30% hard)
+and type (fact, theme, character, moral, interpretation).
+Include chapter field: 0=overall, chapter number for chapter-specific.
+Output JSON: {{"questions": [{{"chapter": 1, "question_text": "...", ...}}]}}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=16384,
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content
+            if not content:
+                return []
+            data = json.loads(content)
+            questions_raw = data if isinstance(data, list) else data.get("questions", [])
+
+            result: list[GeneratedQuestion] = []
+            for q in questions_raw:
+                choices = [
+                    GeneratedChoice(text=c["text"], is_correct=c["is_correct"])
+                    for c in q.get("choices", [])
+                ]
+                ch_num = q.get("chapter", 0)
+                ch_title = ""
+                if ch_num > 0:
+                    ch_info = next((c for c in chapters if c["number"] == ch_num), None)
+                    if ch_info:
+                        ch_title = ch_info["title"]
+                result.append(GeneratedQuestion(
+                    question_text=q["question_text"],
+                    question_type=q.get("question_type", "fact"),
+                    difficulty=q.get("difficulty", "medium"),
+                    choices=choices,
+                    chapter=ch_num,
+                    chapter_title=ch_title,
+                ))
+
+            logger.info(f"Generated {len(result)} qs for '{book_title}' ({len(chapters)}ch)")
+            return result
+        except Exception as e:
+            logger.error(f"Generation failed for '{book_title}': {e}")
+            return []
+
     def generate_for_chapter(
         self,
         book_title: str,
@@ -190,18 +312,17 @@ Vary difficulty: 3 easy, 4 medium, 3 hard questions.
         book_title: str,
         author: str,
         age_range: str = "",
+        num_questions: int = 10,
     ) -> list[GeneratedQuestion]:
-        """Generate 10 general multiple-choice questions for a book.
+        """Generate multiple-choice questions for a book (no chapter data).
 
-        Works without explicit chapter data — the AI has broad knowledge of
-        published books and can generate reasonable questions from title +
-        author alone. Questions cover themes, characters, plot, and morals.
+        The AI uses its knowledge of the book from title + author alone.
         """
         if not self.client:
-            logger.warning("No OpenAI API key configured — skipping question generation")
+            logger.warning("No API key — skipping question generation")
             return []
 
-        prompt = self._build_book_prompt(book_title, author, age_range)
+        prompt = self._build_book_prompt(book_title, author, age_range, num_questions)
 
         try:
             response = self.client.chat.completions.create(
@@ -211,7 +332,7 @@ Vary difficulty: 3 easy, 4 medium, 3 hard questions.
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.7,
-                max_tokens=4096,
+                max_tokens=16384,
                 response_format={"type": "json_object"},
             )
 
@@ -255,12 +376,13 @@ Vary difficulty: 3 easy, 4 medium, 3 hard questions.
         book_title: str,
         author: str,
         age_range: str,
+        num_questions: int = 10,
     ) -> str:
         """Build a prompt for book-level question generation (no chapter data)."""
         age_hint = f" Target age range: {age_range}." if age_range else ""
         return f"""Book: "{book_title}" by {author}.{age_hint}
 
-Generate 10 multiple-choice questions testing a reader's understanding of this book:
+Generate {num_questions} multiple-choice questions testing a reader's understanding of this book:
 - Key plot events and facts
 - Main themes and messages
 - Character motivations and relationships
@@ -268,5 +390,5 @@ Generate 10 multiple-choice questions testing a reader's understanding of this b
 
 The questions should be answerable by someone who has read the book.
 Include at least one 'all of the above' or 'none of the above' variant.
-Vary difficulty: 3 easy, 4 medium, 3 hard.
+Vary difficulty: 30% easy, 40% medium, 30% hard.
 """

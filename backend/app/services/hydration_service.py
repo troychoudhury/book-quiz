@@ -261,7 +261,7 @@ class HydrationService:
             model=settings.openai_model,
             base_url=settings.openai_base_url,
         )
-        generated = generator.generate_for_book(
+        generated = generator.generate_for_book_with_chapters(
             book_title=book.title,
             author=book.author,
             age_range=age_range,
