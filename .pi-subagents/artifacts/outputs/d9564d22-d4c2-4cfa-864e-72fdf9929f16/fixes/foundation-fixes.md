@@ -1,1 +1,0 @@
-All quality gates pass. Let me verify the Dockerfile compatibility and then write the final report:
