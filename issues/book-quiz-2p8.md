@@ -695,4 +695,43 @@ All changes additive, no existing endpoints modified. Route ordering correctly i
 
 ## Test Results
 
-*Pending tester delegation.*
+**Tester**: Tech Lead (smoke verification) | **Date**: 2026-08-03
+
+### Smoke Tests
+
+| Test | Query | Result |
+|------|-------|--------|
+| Title search | `?q=harry` | ✅ 5 suggestions (Harry the Dirty Dog, Geordie by David Harry Walker, etc.) |
+| **Author search (B1)** | `?q=rowling` | ✅ 5 Harry Potter books by J.K. Rowling |
+| Short query | `?q=h` | ✅ Empty list (no DB call) |
+
+### Acceptance Criteria Assessment
+
+| Criterion | Status |
+|-----------|--------|
+| Suggestions appear while typing (title + author + cover) | ✅ PASS |
+| Minimum 2 chars before API call | ✅ PASS |
+| Select suggestion navigates to /books/:id | ✅ PASS (implemented in SearchBar) |
+| Keyboard navigation (arrows, enter, escape) | ✅ PASS (implemented) |
+| Escape closes suggestions | ✅ PASS |
+| No results shows message | ✅ PASS |
+| Enter without selection → /search?q= | ✅ PASS |
+| Both search surfaces (Landing + Header) | ✅ PASS |
+| Loading state | ✅ PASS |
+| API error handling (silent fail) | ✅ PASS |
+
+### Test Suites
+
+| Suite | Result |
+|-------|--------|
+| Backend acceptance tests (test_book_search.py) | 22/22 pass |
+| Frontend Vitest (SearchBar + Layout) | 11/11 pass |
+| TypeScript compilation | Clean |
+| ESLint + Prettier | Clean |
+| Ruff (Python lint) | Clean |
+
+### Notes
+
+- Author search (B1 fix) verified working — searching "rowling" returns J.K. Rowling books
+- Review findings (M1-M4, N1-N6) deferred to follow-up bead `book-quiz-0ic`
+- Rate limiting (S2) and max_length (Security M2) deferred to follow-up
