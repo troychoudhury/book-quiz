@@ -14,7 +14,7 @@ from structlog.typing import Processor
 
 from app.core.config import get_settings
 from app.core.security import limiter
-from app.api import auth, books, profile, quiz
+from app.api import auth, books, profile, quiz, admin
 
 settings = get_settings()
 
@@ -156,3 +156,4 @@ app.include_router(auth.router)
 app.include_router(books.router)
 app.include_router(quiz.router)
 app.include_router(profile.router)
+app.include_router(admin.router)
