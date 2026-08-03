@@ -103,7 +103,26 @@ All 15 fixes are local, independent, and require no new architecture. Grouped by
 
 ## Implementation Notes
 
-*Pending engineer delegation.*
+All 15 findings implemented. No new dependencies, no API contract changes.
+
+### Changed files
+
+- `backend/app/api/books.py` — M3 (`load_only`/`noload` → single SELECT), S-M1 (`@limiter.limit("30/minute")`), S-M2 (`max_length=200`), L3 (`Cache-Control: private, max-age=30`), L2 (comment near limiter), N6 (docstring note on SQLite divergence).
+- `frontend/src/hooks/useAutocomplete.ts` — M1 (exposes `isFetched`), N2 (blanks suggestions + `isFetched` while typed ≠ debounced).
+- `frontend/src/components/SearchBar.tsx` — M2 (`useId()`-scoped ARIA ids on `<ul>`/options), N1 (blur on Escape), N3 (`aria-live="polite"` on listbox), L1 (`https://` guard + `referrerPolicy`/`loading="lazy"` on cover `<img>`), S-M2 (`maxLength={200}`), M1 consumer (empty state only when `isFetched && !isLoading && !isError`).
+- `frontend/src/components/SearchBar.test.tsx` — M4 (loading-state, ArrowUp wrap, debounce-burst, isFetched-gating tests), N4 (`vi.useFakeTimers()` + `act(vi.advanceTimersByTime)` instead of bare `setTimeout`), updated `aria-activedescendant` assertions for useId ids, Escape test now asserts blur.
+- `issues/book-quiz-0ic.md` — this section.
+
+### Acknowledged limitations (no code change)
+
+- **N6 — SQLite pg_trgm emulation divergence is acknowledged.** Production uses PostgreSQL pg_trgm (`similarity()`, `greatest()`); the acceptance-test harness patches `app.api.books.func` with a LIKE-based emulation that diverges on similarity ranking. The production endpoint code remains the source of truth.
+- **L2 — Redis-backed rate limiter is a separate infrastructure concern.** `app/core/security.py` uses `storage_uri="memory://"`; the autocomplete endpoint inherits that storage. Migrating to Redis (multi-process deployments) is tracked as a separate issue.
+
+### Verification
+
+- Backend: `pytest tests/acceptance/test_book_search.py::TestBookAutocomplete tests/unit` — 22 passed. Full-suite run shows 33 pre-existing failures (profile/quiz/search cross-module contamination; identical on the base commit with this change stashed) — not introduced here.
+- Backend smoke (TestClient, SQLite override): `Cache-Control: private, max-age=30` present; `q` missing / 201 chars → 422; 200 chars → 200; rate limiter returns 429 after 30 req/min.
+- Frontend: `vitest run` — 15 passed (12 SearchBar incl. 4 new M4 tests); `tsc -b` — passed; `eslint --max-warnings 0` — passed; `prettier --check` — passed.
 
 ## Code Review
 

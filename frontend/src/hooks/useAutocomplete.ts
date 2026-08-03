@@ -19,7 +19,7 @@ export function useAutocomplete(query: string) {
   const trimmedQuery = debouncedQuery.trim();
   const enabled = trimmedQuery.length >= MIN_QUERY_LENGTH;
 
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isFetched, isError } = useQuery({
     queryKey: ['books', 'autocomplete', trimmedQuery],
     queryFn: () => booksApi.autocomplete(trimmedQuery).then((res) => res.data),
     enabled,
@@ -27,13 +27,20 @@ export function useAutocomplete(query: string) {
   });
 
   return useMemo(() => {
-    const suggestions: AutocompleteSuggestion[] = data?.suggestions ?? [];
+    // N2: while the typed query hasn't settled into the debounced value yet,
+    // blank suggestions so stale results from the previous debounce window are
+    // never shown. isFetched is also suppressed during this window so consumers
+    // never flash a false "No matching books found" message (M1).
+    const isStale = query !== debouncedQuery;
+    const suggestions: AutocompleteSuggestion[] = isStale ? [] : (data?.suggestions ?? []);
+
     return {
       suggestions,
-      isLoading: enabled && isLoading,
-      isError: enabled && isError,
+      isLoading: isStale || (enabled && isLoading),
+      isFetched: enabled && !isStale && isFetched,
+      isError: enabled && !isStale && isError,
     };
-  }, [data, enabled, isLoading, isError]);
+  }, [query, debouncedQuery, data, enabled, isLoading, isFetched, isError]);
 }
 
 export default useAutocomplete;

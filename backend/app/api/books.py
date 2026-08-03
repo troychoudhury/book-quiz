@@ -1,10 +1,11 @@
 """Book search and detail API endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only, noload
 
 from app.core.database import get_db
+from app.core.security import limiter
 from app.models.book import Book
 from app.schemas.book import (
     AutocompleteResponse,
@@ -53,10 +54,15 @@ def search_books(
 
 
 @router.get("/autocomplete", response_model=AutocompleteResponse)
+# L2: Uses in-memory storage; migrate to Redis for multi-process deployments.
+@limiter.limit("30/minute")
 def autocomplete_books(
+    request: Request,
+    response: Response,
     q: str = Query(
         ...,
         min_length=1,
+        max_length=200,
         description="Autocomplete query (min 2 characters after trimming)",
     ),
     db: Session = Depends(get_db),
@@ -65,8 +71,13 @@ def autocomplete_books(
 
     Ranking uses GREATEST(similarity(title, q), similarity(author, q)) so a
     strong match on either field surfaces (blocker B1). Requires PostgreSQL
-    pg_trgm; queries shorter than 2 characters short-circuit without a DB hit.
+    pg_trgm; SQLite uses a LIKE fallback that diverges on similarity ranking
+    (acknowledged limitation N6). Queries shorter than 2 characters
+    short-circuit without a DB hit.
     """
+    # L3: private, short-lived cache — browsers may reuse, proxies must not.
+    response.headers["Cache-Control"] = "private, max-age=30"
+
     trimmed = q.strip()
     if len(trimmed) < 2:
         return AutocompleteResponse(suggestions=[])
@@ -74,8 +85,15 @@ def autocomplete_books(
     title_similarity = func.similarity(Book.title, trimmed)
     author_similarity = func.similarity(Book.author, trimmed)
 
+    # M3: selectin-eager `questions`/`quiz_attempts` are irrelevant here and
+    # caused 3 SELECTs per request; load only the suggestion columns.
     books = (
         db.query(Book)
+        .options(
+            load_only(Book.id, Book.title, Book.author, Book.cover_url),
+            noload(Book.questions),
+            noload(Book.quiz_attempts),
+        )
         .filter((title_similarity > 0) | (author_similarity > 0))
         .order_by(
             func.greatest(title_similarity, author_similarity).desc(), Book.title.asc()

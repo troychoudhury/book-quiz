@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { useAutocomplete } from '../hooks/useAutocomplete';
@@ -31,7 +31,11 @@ export default function SearchBar({ variant = 'hero', autoFocus = false }: Searc
   const inputRef = useRef<HTMLInputElement>(null);
   const errorTimerRef = useRef<number | null>(null);
 
-  const { suggestions, isLoading, isError } = useAutocomplete(query);
+  // M2: instance-scoped ARIA ids so two mounted SearchBars never collide.
+  const listboxId = useId();
+  const optionId = (index: number) => `${listboxId}-option-${index}`;
+
+  const { suggestions, isLoading, isFetched, isError } = useAutocomplete(query);
 
   const isHero = variant === 'hero';
   const trimmedQuery = query.trim();
@@ -133,6 +137,7 @@ export default function SearchBar({ variant = 'hero', autoFocus = false }: Searc
         e.preventDefault();
         setIsOpen(false);
         setHighlightedIndex(-1);
+        inputRef.current?.blur();
         break;
       case 'Tab':
         setIsOpen(false);
@@ -167,14 +172,15 @@ export default function SearchBar({ variant = 'hero', autoFocus = false }: Searc
         onBlur={handleBlur}
         autoFocus={autoFocus}
         autoComplete="off"
+        maxLength={200}
         placeholder={isHero ? 'Search by book title or author...' : 'Search books...'}
         aria-label={isHero ? 'Search for a book' : 'Search books'}
         role="combobox"
         aria-expanded={dropdownVisible}
         aria-autocomplete="list"
-        aria-controls="search-autocomplete-listbox"
+        aria-controls={listboxId}
         aria-activedescendant={
-          dropdownVisible && highlightedIndex >= 0 ? `suggestion-${highlightedIndex}` : undefined
+          dropdownVisible && highlightedIndex >= 0 ? optionId(highlightedIndex) : undefined
         }
         className={inputClasses}
       />
@@ -191,9 +197,6 @@ export default function SearchBar({ variant = 'hero', autoFocus = false }: Searc
 
       {dropdownVisible && (
         <div
-          id="search-autocomplete-listbox"
-          role="listbox"
-          aria-label="Search suggestions"
           className={`absolute z-20 w-full overflow-hidden rounded-xl bg-white shadow-lg ring-1 ring-gray-200 ${
             openUpward ? 'bottom-full mb-2' : 'top-full mt-2'
           }`}
@@ -210,11 +213,11 @@ export default function SearchBar({ variant = 'hero', autoFocus = false }: Searc
               Searching...
             </div>
           ) : suggestions.length > 0 ? (
-            <ul>
+            <ul id={listboxId} role="listbox" aria-label="Search suggestions" aria-live="polite">
               {suggestions.map((suggestion, index) => (
                 <li
                   key={suggestion.id}
-                  id={`suggestion-${index}`}
+                  id={optionId(index)}
                   role="option"
                   aria-selected={index === highlightedIndex}
                   onMouseDown={(e) => {
@@ -227,10 +230,12 @@ export default function SearchBar({ variant = 'hero', autoFocus = false }: Searc
                   }`}
                 >
                   <span className="flex h-10 w-8 flex-shrink-0 items-center justify-center overflow-hidden rounded bg-gray-100 text-sm">
-                    {suggestion.cover_url ? (
+                    {suggestion.cover_url?.startsWith('https://') ? (
                       <img
                         src={suggestion.cover_url}
                         alt=""
+                        referrerPolicy="no-referrer"
+                        loading="lazy"
                         className="h-full w-full object-cover"
                       />
                     ) : (
@@ -248,9 +253,9 @@ export default function SearchBar({ variant = 'hero', autoFocus = false }: Searc
                 </li>
               ))}
             </ul>
-          ) : (
+          ) : isFetched && suggestions.length === 0 && !isLoading && !isError ? (
             <div className="px-4 py-3 text-sm text-gray-500">No matching books found</div>
-          )}
+          ) : null}
         </div>
       )}
     </div>
