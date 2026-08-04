@@ -16,6 +16,30 @@ from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
+# Valid question_type values (DB column is VARCHAR(20))
+VALID_QUESTION_TYPES = {"fact", "theme", "character", "moral", "interpretation"}
+VALID_DIFFICULTIES = {"easy", "medium", "hard"}
+
+
+def _sanitize_question_type(raw: str) -> str:
+    """Clamp AI-generated question_type to a valid DB value."""
+    cleaned = raw.strip().lower().replace(" ", "_").replace("-", "_")
+    if cleaned in VALID_QUESTION_TYPES:
+        return cleaned
+    # Map common AI variants
+    for valid in VALID_QUESTION_TYPES:
+        if valid in cleaned:
+            return valid
+    return "fact"
+
+
+def _sanitize_difficulty(raw: str) -> str:
+    """Clamp AI-generated difficulty to a valid DB value."""
+    cleaned = raw.strip().lower()
+    if cleaned in VALID_DIFFICULTIES:
+        return cleaned
+    return "medium"
+
 
 @dataclass
 class GeneratedChoice:
@@ -139,6 +163,10 @@ Output as JSON: {{"chapters": [{{"number": 1, "title": "...", "summary": "..."}}
 
         chapters = self.fetch_chapters(book_title, author)
 
+        # Cap at 10 chapters to keep response within token limits
+        if len(chapters) > 10:
+            chapters = chapters[:10]
+
         if not chapters or len(chapters) < 2:
             logger.info(f"Few/no chapters for '{book_title}' — 30 book-level qs")
             return self.generate_for_book(book_title, author, age_range, num_questions=30)
@@ -192,8 +220,8 @@ Output JSON: {{"questions": [{{"chapter": 1, "question_text": "...", ...}}]}}"""
                         ch_title = ch_info["title"]
                 result.append(GeneratedQuestion(
                     question_text=q["question_text"],
-                    question_type=q.get("question_type", "fact"),
-                    difficulty=q.get("difficulty", "medium"),
+                    question_type=_sanitize_question_type(q.get("question_type", "fact")),
+                    difficulty=_sanitize_difficulty(q.get("difficulty", "medium")),
                     choices=choices,
                     chapter=ch_num,
                     chapter_title=ch_title,
@@ -263,8 +291,8 @@ Output JSON: {{"questions": [{{"chapter": 1, "question_text": "...", ...}}]}}"""
                 result.append(
                     GeneratedQuestion(
                         question_text=q["question_text"],
-                        question_type=q.get("question_type", "fact"),
-                        difficulty=q.get("difficulty", "medium"),
+                        question_type=_sanitize_question_type(q.get("question_type", "fact")),
+                        difficulty=_sanitize_difficulty(q.get("difficulty", "medium")),
                         choices=choices,
                         chapter=chapter_number,
                         chapter_title=chapter_title,
@@ -332,7 +360,7 @@ Vary difficulty: 3 easy, 4 medium, 3 hard questions.
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.7,
-                max_tokens=16384,
+                max_tokens=24576,
                 response_format={"type": "json_object"},
             )
 
@@ -353,8 +381,8 @@ Vary difficulty: 3 easy, 4 medium, 3 hard questions.
                 result.append(
                     GeneratedQuestion(
                         question_text=q["question_text"],
-                        question_type=q.get("question_type", "fact"),
-                        difficulty=q.get("difficulty", "medium"),
+                        question_type=_sanitize_question_type(q.get("question_type", "fact")),
+                        difficulty=_sanitize_difficulty(q.get("difficulty", "medium")),
                         choices=choices,
                         chapter=0,
                         chapter_title="",

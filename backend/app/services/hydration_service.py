@@ -271,30 +271,35 @@ class HydrationService:
             return 0
 
         stored = 0
-        for gq in generated:
-            question = Question(
-                id=uuid4(),
-                book_id=book_id,
-                chapter=gq.chapter,
-                chapter_title=gq.chapter_title or None,
-                question_text=gq.question_text,
-                question_type=gq.question_type,
-                difficulty=gq.difficulty,
-            )
-            self.db.add(question)
-            self.db.flush()
-
-            for i, gc in enumerate(gq.choices):
-                choice = Choice(
+        try:
+            for gq in generated:
+                question = Question(
                     id=uuid4(),
-                    question_id=question.id,
-                    choice_text=gc.text,
-                    is_correct=gc.is_correct,
-                    position=i,
+                    book_id=book_id,
+                    chapter=gq.chapter,
+                    chapter_title=gq.chapter_title or None,
+                    question_text=gq.question_text,
+                    question_type=gq.question_type,
+                    difficulty=gq.difficulty,
                 )
-                self.db.add(choice)
-            stored += 1
+                self.db.add(question)
+                self.db.flush()
 
-        self.db.commit()
-        logger.info(f"Stored {stored} questions for book {book_id} ('{book.title}')")
-        return stored
+                for i, gc in enumerate(gq.choices):
+                    choice = Choice(
+                        id=uuid4(),
+                        question_id=question.id,
+                        choice_text=gc.text,
+                        is_correct=gc.is_correct,
+                        position=i,
+                    )
+                    self.db.add(choice)
+                stored += 1
+
+            self.db.commit()
+            logger.info(f"Stored {stored} questions for book {book_id} ('{book.title}')")
+            return stored
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"Failed to store questions for book {book_id}: {e}")
+            return 0
