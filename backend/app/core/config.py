@@ -37,7 +37,14 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
 
     # CORS
-    cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+    # CORS — comma-separated origins in env var CORS_ORIGINS.
+    # Default includes local dev + Firebase Hosting + Cloud Run URLs.
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://book-quiz.web.app",
+        "https://book-quiz.firebaseapp.com",
+    ]
 
     # Admin — NO default key. Must be set via env var.
     admin_api_key: str = ""

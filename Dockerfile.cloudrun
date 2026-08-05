@@ -1,0 +1,31 @@
+# ── Book Quiz — Cloud Run Dockerfile ──────────────────────────────────
+# Deploy to Google Cloud Run: gcloud run deploy book-quiz-api --source .
+#
+# Cloud Run expects the container to listen on $PORT (default 8080).
+# Health checks hit /api/v1/health — keep this endpoint lightweight.
+# ─────────────────────────────────────────────────────────────────────
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Create non-root user
+RUN groupadd -r bookquiz && useradd -r -g bookquiz bookquiz
+
+# Install Python dependencies (cached layer)
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy backend source
+COPY backend/ .
+
+# Cloud Run provides $PORT — default to 8000 for local testing
+ENV PORT=8000
+
+RUN chown -R bookquiz:bookquiz /app
+USER bookquiz
+
+EXPOSE 8000 8080
+
+# Use Cloud Run's PORT env var, fallback 8000
+CMD exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}

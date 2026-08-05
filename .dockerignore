@@ -1,10 +1,13 @@
-# Root build context (Fly.io production image) — keep the context lean.
-.git
-.beads
-.pi-subagents
-.logs
-node_modules
+# Cloud Run build — these are not needed in the container
 .venv
 __pycache__
+.pytest_cache
 *.db
+tests/
 .env
+.env.local
+.git
+.gitignore
+node_modules
+frontend
+.python-version
