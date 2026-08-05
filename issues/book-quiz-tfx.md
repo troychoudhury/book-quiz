@@ -729,7 +729,22 @@ against a configurable list of allowed frontend paths, or restricted to the
 
 ## Plan Review
 
-*Pending.*
+**Reviewer**: Architecture Reviewer | **Date**: 2026-08-05
+**Verdict**: **CONDITIONAL PASS** — 3 blockers, 6 recommendations.
+
+### Blockers (must fix)
+
+| # | Finding | Fix |
+|---|---------|-----|
+| B1 | Missing CSP headers — SSO callback parses tokens from URL fragment | Add `Content-Security-Policy: script-src 'self'` |
+| B2 | `link_account` as separate query param — attacker can append to victim URL | Embed in Redis-stored state |
+| B3 | State not deleted after callback — replay risk | `DEL` Redis key after exchange |
+
+### Recommendations
+
+R1: `ON CONFLICT DO NOTHING` for auto-link INSERT. R2: Register `/providers` before `/{provider}/*`. R3: Return 503 when Redis down. R4: Add `avatar_url` + `has_password` to profile. R5: Specify error codes for provider failures. R6: Document email-change limitation.
+
+### Architecture: ✅ PASS — correctly reuses JWT system, no route conflicts, authlib compatible.
 
 ## Implementation Notes
 
