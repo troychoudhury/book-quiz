@@ -10,6 +10,7 @@ from app.core.security import get_current_user
 from app.models.book import Book
 from app.models.quiz import QuizAttempt
 from app.models.user import User
+from app.models.user_oauth_link import UserOAuthLink
 
 router = APIRouter(prefix="/api/v1/users", tags=["users"])
 
@@ -38,9 +39,22 @@ class ProfileResponse(BaseModel):
     id: str
     email: str
     display_name: str
+    # R4: SSO support surfaces the avatar and whether a password is set.
+    avatar_url: str | None = None
+    has_password: bool = False
     total_quizzes: int
     total_questions_answered: int
     books: list[BookProgress]
+
+
+class OAuthLinkResponse(BaseModel):
+    """A linked OAuth provider with its creation timestamp."""
+
+    provider: str
+    linked_at: str
+
+
+VALID_PROVIDERS = {"google", "facebook", "microsoft"}
 
 
 @router.get("/me/profile", response_model=ProfileResponse)
@@ -99,10 +113,74 @@ def get_profile(
         id=str(current_user.id),
         email=current_user.email,
         display_name=current_user.display_name,
+        avatar_url=current_user.avatar_url,
+        has_password=current_user.password_hash is not None,
         total_quizzes=len(attempts),
         total_questions_answered=total_answered,
         books=books,
     )
+
+
+@router.get("/me/oauth-links", response_model=list[OAuthLinkResponse])
+def list_oauth_links(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List the OAuth providers linked to the current user."""
+    links = (
+        db.query(UserOAuthLink)
+        .filter(UserOAuthLink.user_id == current_user.id)
+        .order_by(UserOAuthLink.created_at)
+        .all()
+    )
+    return [
+        OAuthLinkResponse(provider=link.provider, linked_at=link.created_at.isoformat())
+        for link in links
+    ]
+
+
+@router.delete("/me/oauth-links/{provider}", status_code=status.HTTP_204_NO_CONTENT)
+def unlink_oauth_provider(
+    provider: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Unlink an OAuth provider.
+
+    Lockout prevention (Q7): a user with no password cannot unlink their last
+    remaining provider, or they would have no way to sign in.
+    """
+    if provider not in VALID_PROVIDERS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Provider not linked.",
+        )
+
+    link = (
+        db.query(UserOAuthLink)
+        .filter(
+            UserOAuthLink.user_id == current_user.id,
+            UserOAuthLink.provider == provider,
+        )
+        .first()
+    )
+    if not link:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Provider not linked.",
+        )
+
+    remaining_links = (
+        db.query(UserOAuthLink).filter(UserOAuthLink.user_id == current_user.id).count()
+    )
+    if current_user.password_hash is None and remaining_links <= 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot unlink the last authentication method. Set a password first.",
+        )
+
+    db.delete(link)
+    db.commit()
 
 
 @router.get("/me/books/{book_id}/progress")

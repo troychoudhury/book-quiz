@@ -9,10 +9,12 @@ import QuizCompletePage from './pages/QuizCompletePage';
 import LoginPage from './pages/LoginPage';
 import SignUpPage from './pages/SignUpPage';
 import ProfilePage from './pages/ProfilePage';
+import OAuthCallbackPage from './pages/OAuthCallbackPage';
 
 export default function App() {
   return (
     <Routes>
+      <Route path="/auth/callback" element={<OAuthCallbackPage />} />
       <Route element={<Layout />}>
         <Route path="/" element={<LandingPage />} />
         <Route path="/search" element={<SearchResultsPage />} />

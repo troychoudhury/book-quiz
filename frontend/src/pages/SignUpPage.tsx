@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
+import OAuthButtons from '../components/OAuthButtons';
 import { authApi } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
 
@@ -38,6 +39,7 @@ export default function SignUpPage() {
             {error}
           </div>
         )}
+        <OAuthButtons />
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label htmlFor="displayName" className="block text-sm font-medium mb-1">

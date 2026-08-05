@@ -748,7 +748,102 @@ R1: `ON CONFLICT DO NOTHING` for auto-link INSERT. R2: Register `/providers` bef
 
 ## Implementation Notes
 
-*Pending.*
+**Date:** 2026-08-05 — Implemented per task spec (supersedes the architecture
+sketch where they conflict; deviations listed below).
+
+### What was built
+
+**Backend**
+- `backend/app/services/oauth_service.py` (NEW) — `OAuthService` with the
+  `PROVIDERS` registry (google/facebook/microsoft), `get_authorization_url()`
+  (authlib `OAuth2Client`, PKCE S256 for Google & Microsoft — Facebook does
+  not support PKCE for web apps, so it is skipped for that provider),
+  `exchange_code()` (token exchange + userinfo normalization), and Redis state
+  storage (`oauth:state:{state}`, TTL 10 min, single-use delete).
+- `backend/app/api/oauth.py` (NEW) — `GET /api/v1/auth/oauth/providers`
+  (registered BEFORE `/{provider}/*` — R2), `GET /{provider}/login` (state in
+  Redis, 302 to provider), `GET /{provider}/callback` (state validation + DEL,
+  code exchange, find-or-create, JWT issuance, fragment redirect). 404 for
+  unconfigured providers, 503 when Redis is down (R3).
+- `backend/app/models/user_oauth_link.py` (NEW) — `UserOAuthLink` with
+  UNIQUE(provider, provider_user_id) and UNIQUE(user_id, provider);
+  `created_at` from base model serves as `linked_at` in API responses.
+- `backend/app/models/user.py` — `password_hash` nullable, new `avatar_url`,
+  `oauth_links` relationship (cascade delete).
+- `backend/app/services/auth_service.py` — `authenticate()` early-returns None
+  for SSO-only accounts (Q4); new `create_user_from_oauth()`,
+  `link_oauth_provider()` (dialect-aware `INSERT … ON CONFLICT DO NOTHING` —
+  R1), `find_oauth_link()`, `get_user_by_email()`.
+- `backend/app/api/profile.py` — `GET/DELETE /users/me/oauth-links` with
+  lockout prevention (Q7: cannot unlink last method when no password);
+  `ProfileResponse` gains `avatar_url` + `has_password` (R4).
+- `backend/app/main.py` — CSP `script-src 'self'` on all responses (B1);
+  oauth router registered.
+- `backend/alembic/versions/0002_add_oauth.py` (NEW) — password_hash
+  nullable, users.avatar_url, user_oauth_links table + index.
+- `backend/requirements.txt` — `authlib>=1.3.0,<2.0.0` (verified against
+  authlib 1.7.2).
+- `.env.example` — provider placeholder env vars (per task spec names:
+  `GOOGLE_CLIENT_ID`, … `OAUTH_REDIRECT_DOMAIN`, `OAUTH_FRONTEND_CALLBACK_URL`).
+  Providers are active only when CLIENT_ID is non-empty.
+
+**Frontend**
+- `frontend/src/components/OAuthButtons.tsx` (NEW) — fetches
+  `GET /auth/oauth/providers`, renders direct `<a>` links to the backend login
+  endpoint, divider above the email form.
+- `frontend/src/pages/OAuthCallbackPage.tsx` (NEW) — reads JWT from URL
+  fragment, clears the hash, stores tokens via authStore, fetches
+  `/users/me/profile` for the real user (name/avatar/hasPassword), redirects
+  to `redirect_to` or `/`; link-flow redirects to `/profile`; `?error=` shows
+  a failure card.
+- `LoginPage`/`SignUpPage` render `<OAuthButtons />` above the form;
+  LoginPage surfaces `?error=` (provider denial) in its alert banner.
+- `App.tsx` — `/auth/callback` route (outside the shared Layout).
+- `services/api.ts` — `oauthApi.getOAuthProviders()`, `getOAuthLinks()`,
+  `unlinkOAuth(provider)`; `API_BASE` exported.
+- `types/index.ts` — `OAuthProvider`, `OAuthProvidersResponse`, `OAuthLink`;
+  `UserProfile` gains `avatar_url` + `has_password`.
+- `stores/authStore.ts` — `AuthUser` gains `avatar_url` and `hasPassword`.
+
+### Review fixes (Plan Review)
+- **B1** CSP: `Content-Security-Policy: script-src 'self'` added in the
+  security-headers middleware.
+- **B2** `link_account` never travels as a query param on the callback — the
+  login endpoint requires an authenticated user and embeds `link_user_id` in
+  the Redis state payload; the callback links to that stored user id.
+- **B3** `consume_state()` GETs then DELETEs the Redis key; replaying a
+  consumed state returns 400 (covered by tests).
+- **R1** link insert uses `ON CONFLICT DO NOTHING` (idempotent; covered by test).
+- **R2** `/providers` route declared before `/{provider}/*` routes.
+- **R3** Redis failures raise `OAuthRedisUnavailableError` → 503 on login and
+  callback endpoints.
+- **R4** Profile response includes `avatar_url` and `has_password`.
+
+### Deviations from the issue-doc architecture (per task spec)
+- Single `oauth_service.py` module (task spec §6) instead of the
+  `services/oauth/` sub-package; the `OAuthProvider` ABC from the architecture
+  plan was folded into the `PROVIDERS` dict + authlib client factory.
+- `exchange_code(provider, code, state, redirect_uri)` takes the state to
+  recover the PKCE verifier (spec sketch omitted it — required for PKCE).
+  Returns a normalized userinfo dict.
+- Env var names follow the task spec (`GOOGLE_CLIENT_ID`, …,
+  `OAUTH_REDIRECT_DOMAIN`) rather than the issue doc's `OAUTH_GOOGLE_CLIENT_ID`
+  naming.
+- `user_oauth_links` model adds `provider_email`/`name`/`avatar_url` columns
+  (task spec §3); `linked_at` is served from the base `created_at` column.
+- `link_account` link flow redirects to the frontend origin's `/profile`
+  (no new tokens). No frontend UI exposes linking yet — backend is ready.
+- Login flow appends `redirect_to` (validated same-origin relative path) to the
+  fragment; the callback page uses it when present.
+
+### Known limitations / future work
+- No "Set Password" feature yet — SSO-only users cannot set a password (Q4).
+- Email change on the provider creates a separate account (documented risk,
+  R6) — profile-page linking can re-merge.
+- `redirect_to` is origin-restricted to relative paths (open-redirect safe);
+  a whitelist of allowed paths can be added later.
+- Frontend profile page does not yet render linked providers / avatar — API is
+  complete and covered by tests; UI work is out of scope for this task.
 
 ## Code Review
 

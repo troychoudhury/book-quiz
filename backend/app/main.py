@@ -14,7 +14,7 @@ from structlog.typing import Processor
 
 from app.core.config import get_settings
 from app.core.security import limiter
-from app.api import auth, books, profile, quiz, admin
+from app.api import auth, books, oauth, profile, quiz, admin
 
 settings = get_settings()
 
@@ -100,6 +100,9 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    # B1: SSO callback delivers JWTs via the URL fragment — restrict script
+    # sources to the app itself so injected scripts cannot read the tokens.
+    response.headers["Content-Security-Policy"] = "script-src 'self'"
     if settings.environment == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     # Prevent caching of sensitive responses
@@ -153,6 +156,7 @@ async def health_check():
     return {"status": "healthy", "version": settings.app_version}
 
 app.include_router(auth.router)
+app.include_router(oauth.router)
 app.include_router(books.router)
 app.include_router(quiz.router)
 app.include_router(profile.router)

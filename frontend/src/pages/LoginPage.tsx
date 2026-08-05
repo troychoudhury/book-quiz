@@ -1,13 +1,16 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 
+import OAuthButtons from '../components/OAuthButtons';
 import { authApi } from '../services/api';
 import { useAuthStore } from '../stores/authStore';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
+  // SSO provider denials arrive as /login?error=... (see api/oauth.py).
+  const [error, setError] = useState<string | null>(searchParams.get('error'));
   const [submitting, setSubmitting] = useState(false);
   const { setTokens, setUser } = useAuthStore();
   const navigate = useNavigate();
@@ -38,6 +41,7 @@ export default function LoginPage() {
             {error}
           </div>
         )}
+        <OAuthButtons />
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label htmlFor="email" className="block text-sm font-medium mb-1">

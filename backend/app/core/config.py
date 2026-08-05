@@ -45,6 +45,21 @@ class Settings(BaseSettings):
     # Rate limiting
     rate_limit_enabled: bool = True
 
+    # OAuth / SSO — provider secrets are optional; a provider is only
+    # enabled when its CLIENT_ID is set (see app/services/oauth_service.py).
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    facebook_client_id: str = ""
+    facebook_client_secret: str = ""
+    microsoft_client_id: str = ""
+    microsoft_client_secret: str = ""
+
+    # Base URL the OAuth provider callbacks point at (register
+    # {OAUTH_REDIRECT_DOMAIN}/api/v1/auth/oauth/{provider}/callback in each
+    # provider dashboard) and the SPA page that receives the JWT fragment.
+    oauth_redirect_domain: str = "http://localhost:8000"
+    oauth_frontend_callback_url: str = "http://localhost:5173/auth/callback"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     def validate_for_environment(self) -> None:

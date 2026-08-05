@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.user import User
+from app.models.user_oauth_link import UserOAuthLink
 
 settings = get_settings()
 
@@ -58,9 +59,16 @@ class AuthService:
         return user
 
     def authenticate(self, email: str, password: str) -> User | None:
-        """Authenticate a user by email and password. Returns None if invalid."""
+        """Authenticate a user by email and password. Returns None if invalid.
+
+        SSO-only accounts have ``password_hash IS NULL`` and can never
+        authenticate with a password (issues/book-quiz-tfx.md Q4) — they must
+        sign in through their OAuth provider.
+        """
         user = self.db.query(User).filter(User.email == email.strip().lower()).first()
-        if not user or not verify_password(password, user.password_hash):
+        if not user or not user.password_hash:
+            return None
+        if not verify_password(password, user.password_hash):
             return None
         if not user.is_active:
             return None
@@ -106,3 +114,73 @@ class AuthService:
     def get_user_by_id(self, user_id: uuid.UUID) -> User | None:
         """Fetch a user by ID."""
         return self.db.query(User).filter(User.id == user_id).first()
+
+    def get_user_by_email(self, email: str) -> User | None:
+        """Fetch a user by normalized email."""
+        return self.db.query(User).filter(User.email == email.strip().lower()).first()
+
+    def create_user_from_oauth(
+        self,
+        email: str,
+        name: str | None,
+        avatar_url: str | None,
+    ) -> User:
+        """Create an SSO-only user (no password hash) from provider userinfo."""
+        normalized_email = email.strip().lower()
+        user = User(
+            email=normalized_email,
+            password_hash=None,
+            display_name=(name or "").strip() or normalized_email.split("@")[0],
+            avatar_url=avatar_url,
+        )
+        self.db.add(user)
+        self.db.commit()
+        self.db.refresh(user)
+        return user
+
+    def find_oauth_link(
+        self,
+        provider: str,
+        provider_user_id: str,
+    ) -> UserOAuthLink | None:
+        """Find a link by provider identity (used to log into an existing link)."""
+        return (
+            self.db.query(UserOAuthLink)
+            .filter(
+                UserOAuthLink.provider == provider,
+                UserOAuthLink.provider_user_id == provider_user_id,
+            )
+            .first()
+        )
+
+    def link_oauth_provider(
+        self,
+        user_id: uuid.UUID,
+        provider: str,
+        provider_user_id: str,
+        email: str,
+        name: str | None,
+        avatar_url: str | None,
+    ) -> bool:
+        """Link a provider identity to a user.
+
+        Uses ``INSERT ... ON CONFLICT DO NOTHING`` (R1) so linking is
+        idempotent: returns True only when a new link row was created.
+        """
+        values = {
+            "user_id": user_id,
+            "provider": provider,
+            "provider_user_id": provider_user_id,
+            "provider_email": email.strip().lower(),
+            "name": name,
+            "avatar_url": avatar_url,
+        }
+        if self.db.get_bind().dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert
+        else:
+            from sqlalchemy.dialects.sqlite import insert
+
+        stmt = insert(UserOAuthLink).values(**values).on_conflict_do_nothing()
+        result = self.db.execute(stmt)
+        self.db.commit()
+        return (result.rowcount or 0) > 0

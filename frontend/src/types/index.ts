@@ -104,6 +104,21 @@ export interface RegisterRequest {
   display_name: string;
 }
 
+// ── OAuth / SSO Types ────────────────────────────────────────────
+export interface OAuthProvider {
+  provider: string;
+  name: string;
+}
+
+export interface OAuthProvidersResponse {
+  providers: OAuthProvider[];
+}
+
+export interface OAuthLink {
+  provider: string;
+  linked_at: string;
+}
+
 // ── Profile Types ───────────────────────────────────────────────
 export interface AttemptSummary {
   attempt_number: number;
@@ -127,6 +142,8 @@ export interface UserProfile {
   id: string;
   email: string;
   display_name: string;
+  avatar_url: string | null;
+  has_password: boolean;
   total_quizzes: number;
   total_questions_answered: number;
   books: BookProgress[];

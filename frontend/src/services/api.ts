@@ -7,6 +7,8 @@ import type {
   BookSearchResponse,
   CompleteQuizResponse,
   LoginRequest,
+  OAuthLink,
+  OAuthProvidersResponse,
   RegisterRequest,
   StartQuizResponse,
   AnswerResponse,
@@ -14,7 +16,7 @@ import type {
   UserResponse,
 } from '../types';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -95,6 +97,13 @@ export const authApi = {
   login: (data: LoginRequest) => api.post<TokenResponse>('/api/v1/auth/login', data),
   refresh: (refresh_token: string) =>
     api.post<TokenResponse>('/api/v1/auth/refresh', { refresh_token }),
+};
+
+// ── OAuth / SSO API ─────────────────────────────────────────────────────
+export const oauthApi = {
+  getOAuthProviders: () => api.get<OAuthProvidersResponse>('/api/v1/auth/oauth/providers'),
+  getOAuthLinks: () => api.get<OAuthLink[]>('/api/v1/users/me/oauth-links'),
+  unlinkOAuth: (provider: string) => api.delete(`/api/v1/users/me/oauth-links/${provider}`),
 };
 
 // ── Books API ───────────────────────────────────────────────────────────
