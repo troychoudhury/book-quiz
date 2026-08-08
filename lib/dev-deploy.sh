@@ -13,45 +13,48 @@
 #==============================================================================
 
 DEPLOY_ENV="production"
+DEPLOY_IMAGE=""  # set by build_and_push_image; consumed by backend/worker deploy
 
-# ── deploy backend (Cloud Run) ──────────────────────────────────────
-deploy_backend() {
+# ── shared build / env helpers ─────────────────────────────────────
+# Build the backend image once and set $DEPLOY_IMAGE. Used by both the web
+# service and the worker (same image, different command). Uses a global
+# instead of echo-capture because docker's build/push progress goes to
+# stdout and would corrupt a $(...) substitution.
+build_and_push_image() {
     require_deploy_deps
     require_env_file
 
-    local project service_name image_tag image
+    local project image_tag
     project="$(gcloud config get-value project 2>/dev/null)" || {
         err "gcloud project not set. Run: gcloud config set project <project-id>"
         exit 1
     }
-    service_name="book-quiz-api"
-    [[ "$DEPLOY_ENV" == "staging" ]] && service_name="book-quiz-api-staging"
-    image_tag="gcr.io/${project}/${service_name}:$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d-%H%M%S)"
-    image="${image_tag}"
+    image_tag="gcr.io/${project}/book-quiz-api:$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d-%H%M%S)"
+    DEPLOY_IMAGE="${image_tag}"
 
-    step "Building backend image (Dockerfile.cloudrun) → ${image}"
-    docker buildx build --load -f "${DEV_ROOT}/Dockerfile.cloudrun" -t "${image}" "${DEV_ROOT}" || {
+    step "Building backend image (Dockerfile.cloudrun) → ${image_tag}"
+    docker buildx build --load -f "${DEV_ROOT}/Dockerfile.cloudrun" -t "${image_tag}" "${DEV_ROOT}" || {
         err "Docker build failed."
         exit 1
     }
 
-    step "Pushing image → ${image}"
-    docker push "${image}" || {
+    step "Pushing image → ${image_tag}"
+    docker push "${image_tag}" || {
         err "Docker push failed. Check gcloud auth: gcloud auth configure-docker"
         exit 1
     }
+}
 
-    step "Deploying to Cloud Run (${service_name})"
-    # Build env-vars YAML from .env.production (or .env if missing).
-    # --env-vars-file is used instead of --set-env-vars because the latter
-    # splits on commas and CORS_ORIGINS values contain commas — YAML handles
-    # commas and special characters without escaping issues.
+# Build an env-vars YAML file from .env.production (or .env if missing).
+# --env-vars-file is used instead of --set-env-vars because the latter
+# splits on commas and CORS_ORIGINS values contain commas — YAML handles
+# commas and special characters without escaping issues.
+# Prints the temp file path; the caller must rm it.
+build_env_yaml() {
     local env_file="${DEV_ROOT}/.env.production"
     [[ ! -f "$env_file" ]] && env_file="${DEV_ROOT}/.env"
     local env_yaml
     env_yaml="$(mktemp)"
-    # Generate YAML via python for correct quoting of special characters
-    # (values may contain quotes, commas, JSON arrays, etc.)
     python3 -c "
 import sys, json
 out = []
@@ -63,18 +66,36 @@ for line in open('$env_file'):
     out.append(f'\"{key}\": {json.dumps(val)}')
 print('\\n'.join(out))
 " > "$env_yaml"
+    echo "$env_yaml"
+}
 
-    # Get Cloud SQL connection name from DATABASE_URL if available
-    local cloudsql_inst=""
+# Cloud SQL connection name from DATABASE_URL (empty when not used).
+cloudsql_instance() {
+    local env_file="${DEV_ROOT}/.env.production"
+    [[ ! -f "$env_file" ]] && env_file="${DEV_ROOT}/.env"
     local db_url
     db_url="$(grep '^DATABASE_URL=' "$env_file" | cut -d= -f2-)"
     if echo "$db_url" | grep -q 'host=/cloudsql/'; then
-        cloudsql_inst="$(echo "$db_url" | grep -oP 'host=/cloudsql/\K[^?&]+' || true)"
+        echo "$db_url" | grep -oP 'host=/cloudsql/\K[^?&]+' || true
     fi
+}
+
+# ── deploy backend (Cloud Run web service) ─────────────────────────
+deploy_backend() {
+    local image service_name env_yaml cloudsql_inst
+    if [[ -z "$DEPLOY_IMAGE" ]]; then
+        build_and_push_image
+    fi
+    image="$DEPLOY_IMAGE"
+    service_name="book-quiz-api"
+    [[ "$DEPLOY_ENV" == "staging" ]] && service_name="book-quiz-api-staging"
+    env_yaml="$(build_env_yaml)"
+    cloudsql_inst="$(cloudsql_instance)"
 
     local extra_flags=""
     [[ -n "$cloudsql_inst" ]] && extra_flags="--add-cloudsql-instances=${cloudsql_inst}"
 
+    step "Deploying to Cloud Run (${service_name})"
     gcloud run deploy "${service_name}" \
         --image "${image}" \
         --region us-central1 \
@@ -84,7 +105,6 @@ print('\\n'.join(out))
         --env-vars-file="${env_yaml}"
     rm -f "$env_yaml"
 
-    # Print the service URL
     local url
     url="$(gcloud run services describe "${service_name}" --region us-central1 --format='value(status.url)' 2>/dev/null || true)"
     if [[ -n "$url" ]]; then
@@ -92,6 +112,43 @@ print('\\n'.join(out))
     else
         ok "Backend deployed."
     fi
+}
+
+# ── deploy worker (Cloud Run Celery consumer) ──────────────────────
+# Same image as the web service, different command: worker_entrypoint.sh
+# runs celery + a tiny health listener (Cloud Run requires $PORT binding).
+# Flags that matter for a queue consumer:
+#   --no-cpu-throttling   CPU stays on even with no inbound requests
+#   --min-instances=1     keep an instance alive to drain the queue
+#   --max-instances=1     one consumer is enough for this app
+#   --no-allow-unauthenticated  no public traffic to a worker
+#
+# Note: image was already built/pushed by deploy_backend in `all` mode;
+# we rebuild only when the worker is the sole target.
+deploy_worker() {
+    local image service_name env_yaml
+    if [[ -z "$DEPLOY_IMAGE" ]]; then
+        build_and_push_image
+    fi
+    image="$DEPLOY_IMAGE"
+    service_name="book-quiz-api-worker"
+    [[ "$DEPLOY_ENV" == "staging" ]] && service_name="book-quiz-api-worker-staging"
+    env_yaml="$(build_env_yaml)"
+
+    step "Deploying Celery worker to Cloud Run (${service_name})"
+    gcloud run deploy "${service_name}" \
+        --image "${image}" \
+        --region us-central1 \
+        --platform managed \
+        --no-allow-unauthenticated \
+        --min-instances=1 \
+        --max-instances=1 \
+        --no-cpu-throttling \
+        --command=/app/worker_entrypoint.sh \
+        --env-vars-file="${env_yaml}"
+    rm -f "$env_yaml"
+
+    ok "Worker deployed (${service_name}) — consuming queue from ${image}"
 }
 
 # ── deploy frontend (Firebase Hosting) ──────────────────────────────
@@ -161,18 +218,19 @@ cmd_deploy() {
         case "$arg" in
             --staging) DEPLOY_ENV="staging" ;;
             --help|-h)
-                echo "Usage: ./dev deploy [all|backend|frontend] [--staging]"
+                echo "Usage: ./dev deploy [all|backend|frontend|worker] [--staging]"
                 echo ""
-                echo "Deploy production images to Cloud Run (backend) and Firebase (frontend)."
+                echo "Deploy production images: backend + worker to Cloud Run, frontend to Firebase."
                 echo ""
-                echo "  dev deploy              Deploy both (default)"
-                echo "  dev deploy backend      Deploy backend to Cloud Run"
-                echo "  dev deploy frontend     Deploy frontend to Firebase Hosting"
-                echo "  dev deploy --staging    Deploy to staging environment"
+                echo "  dev deploy                Deploy all (default)"
+                echo "  dev deploy backend        Deploy backend web service to Cloud Run"
+                echo "  dev deploy worker         Deploy Celery worker to Cloud Run"
+                echo "  dev deploy frontend       Deploy frontend to Firebase Hosting"
+                echo "  dev deploy --staging      Deploy to staging environment"
                 return 0
                 ;;
-            backend|frontend|all) target="$arg" ;;
-            *) err "Unknown flag: $arg"; echo "Usage: ./dev deploy [all|backend|frontend] [--staging]"; exit 1 ;;
+            backend|frontend|worker|all) target="$arg" ;;
+            *) err "Unknown flag: $arg"; echo "Usage: ./dev deploy [all|backend|frontend|worker] [--staging]"; exit 1 ;;
         esac
     done
 
@@ -182,11 +240,19 @@ cmd_deploy() {
 
     case "$target" in
         all)
+            # Build/push the image once; backend + worker both reuse it.
+            build_and_push_image
             deploy_backend
+            deploy_worker
             deploy_frontend
             ;;
         backend)
+            build_and_push_image
             deploy_backend
+            ;;
+        worker)
+            build_and_push_image
+            deploy_worker
             ;;
         frontend)
             deploy_frontend

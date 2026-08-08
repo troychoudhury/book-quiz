@@ -16,7 +16,8 @@ RUN groupadd -r bookquiz && useradd -r -g bookquiz bookquiz
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend source
+# Copy backend source (worker_entrypoint.sh keeps its executable bit
+# from the build context — Docker preserves file modes on COPY)
 COPY backend/ .
 
 # Cloud Run provides $PORT — default to 8000 for local testing
