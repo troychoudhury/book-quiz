@@ -123,9 +123,44 @@ cmd_shell() {
 
 # ── build ───────────────────────────────────────────────────────────
 cmd_build() {
+    local target="all"
+    for arg in "$@"; do
+        case "$arg" in
+            --help|-h)
+                echo "Usage: ./dev build [all|backend|frontend]"
+                echo ""
+                echo "Build production Docker images."
+                echo ""
+                echo "  dev build          Build all images (default)"
+                echo "  dev build backend  Build backend image (Dockerfile.cloudrun)"
+                echo "  dev build frontend Build frontend image (frontend/Dockerfile)"
+                return 0
+                ;;
+            all|backend|frontend) target="$arg" ;;
+            *) err "Unknown flag: $arg"; exit 1 ;;
+        esac
+    done
+
     require_docker
-    info "Building production Docker images (backend + frontend)..."
-    compose build
+
+    if [[ "$target" == "all" || "$target" == "backend" ]]; then
+        step "Building backend production image (Dockerfile.cloudrun)"
+        docker buildx build --load -f "${DEV_ROOT}/Dockerfile.cloudrun" -t book-quiz-api:latest "${DEV_ROOT}" || {
+            err "Backend build failed."
+            exit 1
+        }
+        ok "Backend image built: book-quiz-api:latest"
+    fi
+
+    if [[ "$target" == "all" || "$target" == "frontend" ]]; then
+        step "Building frontend production image (frontend/Dockerfile)"
+        docker buildx build --load -f "${DEV_ROOT}/frontend/Dockerfile" -t book-quiz-frontend:latest "${DEV_ROOT}/frontend" || {
+            err "Frontend build failed."
+            exit 1
+        }
+        ok "Frontend image built: book-quiz-frontend:latest"
+    fi
+
     ok "Build complete."
 }
 
@@ -249,7 +284,8 @@ Stack lifecycle:
   down [--volumes]        Stop everything (--volumes wipes database data)
 
 Testing & quality:
-  test [--unit|--e2e|--coverage]  Run the test suite
+  test [all|backend|frontend] [--unit|--e2e|--coverage]
+                       Run the test suite
   lint                 Run all linters (ruff, mypy, eslint, prettier)
   format               Auto-format all code
 
@@ -259,11 +295,16 @@ Database:
   db-reset             Drop + recreate database (with confirmation)
   db-seed              Seed sample data (needs hydration pipeline)
 
+Build & deploy:
+  build [all|backend|frontend]
+                       Build production Docker images
+  deploy [all|backend|frontend] [--staging]
+                       Deploy to Cloud Run / Firebase Hosting
+
 Operations:
   logs [service]       Tail logs (backend|frontend|celery or containers)
   ps                   Show process + container status
   shell <service>      Open a shell (db|redis|backend|frontend)
-  build                Build production Docker images
   clean                Remove containers, volumes, venv, node_modules
 
 Other:

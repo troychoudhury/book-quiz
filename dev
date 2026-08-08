@@ -39,6 +39,8 @@ source "${SCRIPT_DIR}/lib/dev-test.sh"
 source "${SCRIPT_DIR}/lib/dev-db.sh"
 # shellcheck source=lib/dev-util.sh
 source "${SCRIPT_DIR}/lib/dev-util.sh"
+# shellcheck source=lib/dev-deploy.sh
+source "${SCRIPT_DIR}/lib/dev-deploy.sh"
 
 main() {
     local cmd="${1:-help}"
@@ -59,6 +61,7 @@ main() {
         ps)                cmd_ps "$@" ;;
         shell)             cmd_shell "$@" ;;
         build)             cmd_build "$@" ;;
+        deploy)            cmd_deploy "$@" ;;
         clean)             cmd_clean "$@" ;;
         doctor)            cmd_doctor "$@" ;;
         generate-secrets)  cmd_generate_secrets "$@" ;;

@@ -3,7 +3,7 @@
 # If you have ./dev, prefer: ./dev <command>
 # If you prefer make:  make setup, make up, make test, etc.
 
-.PHONY: setup up down test lint format clean help
+.PHONY: setup up down test lint format build deploy clean help
 
 setup:
 	@./dev setup
@@ -22,6 +22,12 @@ lint:
 
 format:
 	@./dev format
+
+build:
+	@./dev build
+
+deploy:
+	@./dev deploy $(filter-out $@,$(MAKECMDGOALS))
 
 db-migrate:
 	@./dev db-migrate
@@ -44,6 +50,8 @@ help:
 	@echo "  make test        Run all tests"
 	@echo "  make lint        Run linters"
 	@echo "  make format      Auto-format code"
+	@echo "  make build       Build production Docker images"
+	@echo "  make deploy      Deploy to Cloud Run / Firebase"
 	@echo "  make db-migrate  Run database migrations"
 	@echo "  make clean       Remove build artifacts"
 	@echo "  make doctor      Diagnose issues"

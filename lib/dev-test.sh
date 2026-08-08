@@ -49,12 +49,26 @@ test_e2e() {
 
 cmd_test() {
     local E2E=false UNIT_ONLY=false COVERAGE=false
+    local target="all"
     for arg in "$@"; do
         case "$arg" in
             --unit) UNIT_ONLY=true ;;
             --e2e)  E2E=true ;;
             --coverage) COVERAGE=true ;;
-            --help|-h) echo "Usage: ./dev test [--unit|--e2e|--coverage]"; return 0 ;;
+            all|backend|frontend) target="$arg" ;;
+            --help|-h)
+                echo "Usage: ./dev test [all|backend|frontend] [--unit|--e2e|--coverage]"
+                echo ""
+                echo "Run the test suite."
+                echo ""
+                echo "  dev test              Run all tests (default)"
+                echo "  dev test backend      Run backend tests only (pytest)"
+                echo "  dev test frontend     Run frontend tests only (vitest)"
+                echo "  dev test --e2e        Run end-to-end tests only (Playwright)"
+                echo "  dev test --unit       Skip e2e tests"
+                echo "  dev test --coverage   Generate coverage reports"
+                return 0
+                ;;
             *) err "Unknown flag: $arg"; exit 1 ;;
         esac
     done
@@ -67,9 +81,13 @@ cmd_test() {
         return 0
     fi
 
-    test_backend
-    test_frontend
-    if [[ "$UNIT_ONLY" != true ]]; then
+    if [[ "$target" == "all" || "$target" == "backend" ]]; then
+        test_backend
+    fi
+    if [[ "$target" == "all" || "$target" == "frontend" ]]; then
+        test_frontend
+    fi
+    if [[ "$UNIT_ONLY" != true && ("$target" == "all" || "$target" == "backend") ]]; then
         test_e2e || warn "e2e tests failed or skipped (stack must be running)."
     fi
     ok "All tests passed."
