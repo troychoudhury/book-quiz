@@ -42,16 +42,32 @@ deploy_backend() {
     }
 
     step "Deploying to Cloud Run (${service_name})"
-    # Build the --set-env-vars string from .env.production (or .env if missing)
+    # Build env-vars YAML from .env.production (or .env if missing).
+    # --env-vars-file is used instead of --set-env-vars because the latter
+    # splits on commas and CORS_ORIGINS values contain commas — YAML handles
+    # commas and special characters without escaping issues.
     local env_file="${DEV_ROOT}/.env.production"
     [[ ! -f "$env_file" ]] && env_file="${DEV_ROOT}/.env"
-    local env_vars
-    env_vars="$(grep -vE '^(#|$|POSTGRES_DB=|POSTGRES_USER=|POSTGRES_PORT=|BACKEND_PORT=|FRONTEND_PORT=|DEBUG=)' "$env_file" | tr '\n' ',' | sed 's/,$//')"
+    local env_yaml
+    env_yaml="$(mktemp)"
+    # Generate YAML via python for correct quoting of special characters
+    # (values may contain quotes, commas, JSON arrays, etc.)
+    python3 -c "
+import sys, json
+out = []
+for line in open('$env_file'):
+    line = line.strip()
+    if not line or line.startswith('#') or line.startswith(('POSTGRES_DB=', 'POSTGRES_USER=', 'POSTGRES_PORT=', 'BACKEND_PORT=', 'FRONTEND_PORT=', 'DEBUG=')):
+        continue
+    key, _, val = line.partition('=')
+    out.append(f'\"{key}\": {json.dumps(val)}')
+print('\\n'.join(out))
+" > "$env_yaml"
 
     # Get Cloud SQL connection name from DATABASE_URL if available
     local cloudsql_inst=""
     local db_url
-    db_url="$(echo "$env_vars" | grep -oP 'DATABASE_URL=\K[^,]+' || true)"
+    db_url="$(grep '^DATABASE_URL=' "$env_file" | cut -d= -f2-)"
     if echo "$db_url" | grep -q 'host=/cloudsql/'; then
         cloudsql_inst="$(echo "$db_url" | grep -oP 'host=/cloudsql/\K[^?&]+' || true)"
     fi
@@ -65,7 +81,8 @@ deploy_backend() {
         --platform managed \
         --allow-unauthenticated \
         ${extra_flags} \
-        --set-env-vars="${env_vars}"
+        --env-vars-file="${env_yaml}"
+    rm -f "$env_yaml"
 
     # Print the service URL
     local url
