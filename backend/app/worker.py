@@ -17,7 +17,7 @@ celery_app = Celery(
     "bookquiz",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks"],
+    include=["app.tasks", "app.tasks.email_tasks"],
 )
 
 celery_app.conf.update(
@@ -32,8 +32,10 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
 )
 
-# Import tasks so Celery registers them at startup. The module is created
-# as a placeholder now; concrete tasks land with the hydration milestone.
+# Import tasks so Celery registers them at startup. Concrete tasks live in
+# app.tasks.email_tasks (quiz results email); more land with the hydration
+# milestone. The guard keeps app.tasks optional if its package ever shrinks
+# to an empty placeholder again.
 try:  # pragma: no cover - import guard until app.tasks exists
     from app import tasks  # noqa: F401
 except ImportError:

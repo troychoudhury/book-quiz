@@ -1,6 +1,7 @@
 """Quiz-related Pydantic schemas."""
 from datetime import datetime
-from pydantic import BaseModel
+
+from pydantic import BaseModel, EmailStr
 
 
 class ChoiceResponse(BaseModel):
@@ -43,7 +44,7 @@ class AnswerResponse(BaseModel):
 
 
 class CompleteQuizRequest(BaseModel):
-    email: str | None = None
+    email: EmailStr | None = None
 
 
 class QuizResultItem(BaseModel):

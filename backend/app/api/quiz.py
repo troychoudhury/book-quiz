@@ -3,6 +3,7 @@ import random
 import uuid
 from datetime import datetime, timezone
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -26,7 +27,41 @@ from app.schemas.quiz import (
 
 router = APIRouter(prefix="/api/v1/quizzes", tags=["quizzes"])
 
+logger = structlog.get_logger()
+
 QUIZ_QUESTION_COUNT = 10
+
+
+def _enqueue_results_email(
+    email: str,
+    score: int,
+    total: int,
+    percentage: float,
+    results: list[dict],
+) -> None:
+    """Enqueue the quiz results email Celery task (best-effort).
+
+    Imported lazily to avoid a circular import with app.worker. Any failure
+    (e.g. Redis down) is logged and swallowed — email must never block or
+    break quiz completion.
+    """
+    try:
+        from app.tasks.email_tasks import send_quiz_results_email
+
+        send_quiz_results_email.delay(email, score, total, percentage, results)
+        logger.info(
+            "quiz.results_email_enqueued",
+            email=email,
+            score=score,
+            total=total,
+        )
+    except Exception:
+        logger.exception(
+            "quiz.results_email_enqueue_failed",
+            email=email,
+            score=score,
+            total=total,
+        )
 
 
 @router.post("/start", response_model=StartQuizResponse, status_code=status.HTTP_201_CREATED)
@@ -246,11 +281,18 @@ def complete_quiz(
             )
         )
 
+    percentage = round((score / total * 100) if total > 0 else 0, 1)
+
+    # Best-effort results email — never blocks or breaks completion.
+    if request is not None and request.email:
+        results_data = [item.model_dump() for item in results]
+        _enqueue_results_email(request.email, score, total, percentage, results_data)
+
     return CompleteQuizResponse(
         attempt_id=str(attempt.id),
         score=score,
         total=total,
-        percentage=round((score / total * 100) if total > 0 else 0, 1),
+        percentage=percentage,
         completed_at=attempt.completed_at,
         results=results,
     )

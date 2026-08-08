@@ -25,6 +25,15 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
+    # Email / SMTP — optional. When SMTP_PASSWORD is empty, result emails are
+    # skipped with a warning (best-effort only — never blocks quiz completion).
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "Book Quiz"
+
     # Auth — NO default secret. Must be set via env var.
     jwt_secret_key: str = ""
     jwt_algorithm: str = "HS256"

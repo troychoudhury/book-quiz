@@ -10,6 +10,7 @@ os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 os.environ.setdefault("ENVIRONMENT", "test")
 
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -226,18 +227,24 @@ class TestAnswerQuestion:
 class TestCompleteQuiz:
     """Quiz completion endpoint."""
 
-    def test_complete_quiz_returns_score(self, client, book_with_questions):
-        """Completing a quiz after answering all 10 questions returns score."""
-        resp = client.post("/api/v1/quizzes/start", json={"book_id": book_with_questions})
-        attempt_id = resp.json()["attempt_id"]
-        questions = resp.json()["questions"]
-
-        # Answer all 10 questions
+    def _answer_all(self, client, attempt_id, questions):
+        """Answer every question in an attempt with its first shuffled choice."""
         for q in questions:
             client.post(
                 f"/api/v1/quizzes/{attempt_id}/answer",
                 json={"question_id": q["id"], "choice_id": q["choices"][0]["id"]},
             )
+
+    def _start_and_answer_all(self, client, book_with_questions):
+        """Start a quiz and answer all questions; return (attempt_id, questions)."""
+        resp = client.post("/api/v1/quizzes/start", json={"book_id": book_with_questions})
+        data = resp.json()
+        self._answer_all(client, data["attempt_id"], data["questions"])
+        return data["attempt_id"], data["questions"]
+
+    def test_complete_quiz_returns_score(self, client, book_with_questions):
+        """Completing a quiz after answering all 10 questions returns score."""
+        attempt_id, _ = self._start_and_answer_all(client, book_with_questions)
 
         # Complete
         complete_resp = client.post(f"/api/v1/quizzes/{attempt_id}/complete")
@@ -249,6 +256,62 @@ class TestCompleteQuiz:
         assert "percentage" in data
         assert 0 <= data["percentage"] <= 100
         assert len(data["results"]) == 10
+
+    def test_complete_with_email_enqueues_results_email(self, client, book_with_questions, monkeypatch):
+        """Providing an email enqueues the quiz results email task."""
+        mock_task = MagicMock()
+        monkeypatch.setattr("app.tasks.email_tasks.send_quiz_results_email", mock_task)
+
+        attempt_id, _ = self._start_and_answer_all(client, book_with_questions)
+        resp = client.post(
+            f"/api/v1/quizzes/{attempt_id}/complete",
+            json={"email": "reader@example.com"},
+        )
+        assert resp.status_code == 200
+
+        mock_task.delay.assert_called_once()
+        email, score, total, percentage, results_data = mock_task.delay.call_args[0]
+        body = resp.json()
+        assert email == "reader@example.com"
+        assert score == body["score"]
+        assert total == body["total"] == 10
+        assert percentage == body["percentage"]
+        assert len(results_data) == 10
+        for item in results_data:
+            assert set(item.keys()) == {
+                "question_id",
+                "question_text",
+                "selected_choice",
+                "correct_choice",
+                "is_correct",
+                "chapter",
+            }
+
+    def test_complete_without_email_does_not_enqueue(self, client, book_with_questions, monkeypatch):
+        """No email in the request → the email task is not enqueued."""
+        mock_task = MagicMock()
+        monkeypatch.setattr("app.tasks.email_tasks.send_quiz_results_email", mock_task)
+
+        attempt_id, _ = self._start_and_answer_all(client, book_with_questions)
+        resp = client.post(f"/api/v1/quizzes/{attempt_id}/complete")
+        assert resp.status_code == 200
+        mock_task.delay.assert_not_called()
+
+    def test_complete_email_enqueue_failure_does_not_break_completion(
+        self, client, book_with_questions, monkeypatch
+    ):
+        """Redis/Celery failure while enqueuing never breaks quiz completion."""
+        mock_task = MagicMock()
+        mock_task.delay.side_effect = Exception("redis down")
+        monkeypatch.setattr("app.tasks.email_tasks.send_quiz_results_email", mock_task)
+
+        attempt_id, _ = self._start_and_answer_all(client, book_with_questions)
+        resp = client.post(
+            f"/api/v1/quizzes/{attempt_id}/complete",
+            json={"email": "reader@example.com"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 10
 
     def test_complete_without_answers_returns_400(self, client, book_with_questions):
         """Cannot complete a quiz with no answers."""

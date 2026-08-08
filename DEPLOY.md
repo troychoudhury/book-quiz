@@ -70,6 +70,23 @@ redis://default:<password>@<host>.upstash.io:6379
 > **Note:** You only need the Redis URL, not the REST API token. The backend
 > uses `redis-py` with the native Redis protocol over TCP.
 
+### Celery worker (required for email + background tasks)
+
+The backend uses Celery (broker = Redis) for background jobs, including the
+quiz-results email. A Celery worker must be running somewhere to consume the
+queue:
+
+- **Local dev:** `./dev up` starts a Celery worker automatically (both modes).
+- **Fly.io:** `fly.toml` already defines a `worker` process — nothing to do.
+- **Cloud Run (current production):** the `book-quiz-api` service runs only
+  uvicorn. You must deploy a separate long-running worker (e.g. a Cloud Run
+  service with `--min-instances 1` running `celery -A app.worker worker`, a
+  Compute Engine VM, or a small Kubernetes/Cloud Run Job setup). Until a
+  worker is running, emails are queued but never sent.
+
+Upstash officially supports Celery as a broker (blocking pops work over the
+native protocol), so no special Redis config is needed.
+
 If you prefer Cloud Memorystore (for sub-millisecond latency at ~$35+/mo):
 
 ```bash

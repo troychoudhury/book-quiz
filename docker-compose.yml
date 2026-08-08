@@ -63,6 +63,12 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ADMIN_API_KEY: ${ADMIN_API_KEY:-admin-dev-key}
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      SMTP_FROM_NAME: "${SMTP_FROM_NAME:-Book Quiz}"
       ENVIRONMENT: development
       DEBUG: "true"
     ports:
@@ -92,6 +98,12 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-bookquiz}:${DB_PASSWORD:-bookquiz_dev}@db:5432/${POSTGRES_DB:-bookquiz}
       REDIS_URL: redis://:${REDIS_PASSWORD:-bookquiz_dev}@redis:6379/0
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      SMTP_FROM_NAME: "${SMTP_FROM_NAME:-Book Quiz}"
       ENVIRONMENT: development
     depends_on:
       db:
