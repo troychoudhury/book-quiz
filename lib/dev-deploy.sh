@@ -114,43 +114,6 @@ deploy_backend() {
     fi
 }
 
-# ── deploy worker (Cloud Run Celery consumer) ──────────────────────
-# Same image as the web service, different command: worker_entrypoint.sh
-# runs celery + a tiny health listener (Cloud Run requires $PORT binding).
-# Flags that matter for a queue consumer:
-#   --no-cpu-throttling   CPU stays on even with no inbound requests
-#   --min-instances=1     keep an instance alive to drain the queue
-#   --max-instances=1     one consumer is enough for this app
-#   --no-allow-unauthenticated  no public traffic to a worker
-#
-# Note: image was already built/pushed by deploy_backend in `all` mode;
-# we rebuild only when the worker is the sole target.
-deploy_worker() {
-    local image service_name env_yaml
-    if [[ -z "$DEPLOY_IMAGE" ]]; then
-        build_and_push_image
-    fi
-    image="$DEPLOY_IMAGE"
-    service_name="book-quiz-api-worker"
-    [[ "$DEPLOY_ENV" == "staging" ]] && service_name="book-quiz-api-worker-staging"
-    env_yaml="$(build_env_yaml)"
-
-    step "Deploying Celery worker to Cloud Run (${service_name})"
-    gcloud run deploy "${service_name}" \
-        --image "${image}" \
-        --region us-central1 \
-        --platform managed \
-        --no-allow-unauthenticated \
-        --min-instances=1 \
-        --max-instances=1 \
-        --no-cpu-throttling \
-        --command=/app/worker_entrypoint.sh \
-        --env-vars-file="${env_yaml}"
-    rm -f "$env_yaml"
-
-    ok "Worker deployed (${service_name}) — consuming queue from ${image}"
-}
-
 # ── deploy frontend (Firebase Hosting) ──────────────────────────────
 deploy_frontend() {
     require_deploy_deps
@@ -218,19 +181,18 @@ cmd_deploy() {
         case "$arg" in
             --staging) DEPLOY_ENV="staging" ;;
             --help|-h)
-                echo "Usage: ./dev deploy [all|backend|frontend|worker] [--staging]"
+                echo "Usage: ./dev deploy [all|backend|frontend] [--staging]"
                 echo ""
-                echo "Deploy production images: backend + worker to Cloud Run, frontend to Firebase."
+                echo "Deploy production images: backend to Cloud Run, frontend to Firebase."
                 echo ""
                 echo "  dev deploy                Deploy all (default)"
                 echo "  dev deploy backend        Deploy backend web service to Cloud Run"
-                echo "  dev deploy worker         Deploy Celery worker to Cloud Run"
                 echo "  dev deploy frontend       Deploy frontend to Firebase Hosting"
                 echo "  dev deploy --staging      Deploy to staging environment"
                 return 0
                 ;;
-            backend|frontend|worker|all) target="$arg" ;;
-            *) err "Unknown flag: $arg"; echo "Usage: ./dev deploy [all|backend|frontend|worker] [--staging]"; exit 1 ;;
+            backend|frontend|all) target="$arg" ;;
+            *) err "Unknown flag: $arg"; echo "Usage: ./dev deploy [all|backend|frontend] [--staging]"; exit 1 ;;
         esac
     done
 
@@ -240,19 +202,14 @@ cmd_deploy() {
 
     case "$target" in
         all)
-            # Build/push the image once; backend + worker both reuse it.
+            # Build/push the image once; backend reuses it.
             build_and_push_image
             deploy_backend
-            deploy_worker
             deploy_frontend
             ;;
         backend)
             build_and_push_image
             deploy_backend
-            ;;
-        worker)
-            build_and_push_image
-            deploy_worker
             ;;
         frontend)
             deploy_frontend

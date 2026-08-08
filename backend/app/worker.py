@@ -7,6 +7,7 @@ in ``app.tasks`` as the hydration pipeline is implemented.
 Start the worker with:
     celery -A app.worker worker --loglevel=info --concurrency=2
 """
+
 from celery import Celery
 
 from app.core.config import get_settings
@@ -17,7 +18,7 @@ celery_app = Celery(
     "bookquiz",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks", "app.tasks.email_tasks"],
+    include=["app.tasks"],
 )
 
 celery_app.conf.update(
@@ -32,10 +33,9 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
 )
 
-# Import tasks so Celery registers them at startup. Concrete tasks live in
-# app.tasks.email_tasks (quiz results email); more land with the hydration
-# milestone. The guard keeps app.tasks optional if its package ever shrinks
-# to an empty placeholder again.
+# Import tasks so Celery registers them at startup. The quiz-results email
+# is sent directly from the API process (background thread), not via Celery,
+# so app.tasks is currently an empty placeholder. The guard keeps it optional.
 try:  # pragma: no cover - import guard until app.tasks exists
     from app import tasks  # noqa: F401
 except ImportError:

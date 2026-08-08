@@ -3,6 +3,7 @@
 Validates the full quiz lifecycle from a user's perspective,
 including both authenticated and guest flows.
 """
+
 import os
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-acceptance-tests")
@@ -10,7 +11,6 @@ os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 os.environ.setdefault("ENVIRONMENT", "test")
 
 import uuid
-from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -83,12 +83,14 @@ def book_with_questions():
             db.add(q)
             db.flush()
             for pos in range(4):
-                db.add(Choice(
-                    question_id=q.id,
-                    choice_text=f"Choice {pos}",
-                    is_correct=(pos == 0),
-                    position=pos,
-                ))
+                db.add(
+                    Choice(
+                        question_id=q.id,
+                        choice_text=f"Choice {pos}",
+                        is_correct=(pos == 0),
+                        position=pos,
+                    )
+                )
     db.commit()
     book_id = str(book.id)
     db.close()
@@ -117,7 +119,9 @@ class TestStartQuiz:
 
     def test_start_quiz_returns_10_questions(self, client, book_with_questions):
         """Starting a quiz on a book with 15 questions returns exactly 10."""
-        response = client.post("/api/v1/quizzes/start", json={"book_id": book_with_questions})
+        response = client.post(
+            "/api/v1/quizzes/start", json={"book_id": book_with_questions}
+        )
         assert response.status_code == 201
         data = response.json()
         assert "attempt_id" in data
@@ -132,7 +136,9 @@ class TestStartQuiz:
 
     def test_start_quiz_no_questions_returns_404(self, client, book_without_questions):
         """Book without questions returns 404."""
-        response = client.post("/api/v1/quizzes/start", json={"book_id": book_without_questions})
+        response = client.post(
+            "/api/v1/quizzes/start", json={"book_id": book_without_questions}
+        )
         assert response.status_code == 404
 
     def test_start_quiz_invalid_book_id_returns_400(self, client):
@@ -148,7 +154,9 @@ class TestStartQuiz:
 
     def test_start_quiz_guest_flow(self, client, book_with_questions):
         """Guest (no auth token) can start a quiz."""
-        response = client.post("/api/v1/quizzes/start", json={"book_id": book_with_questions})
+        response = client.post(
+            "/api/v1/quizzes/start", json={"book_id": book_with_questions}
+        )
         assert response.status_code == 201
         assert "attempt_id" in response.json()
 
@@ -159,7 +167,9 @@ class TestAnswerQuestion:
     @pytest.fixture
     def active_attempt(self, client, book_with_questions):
         """Start a quiz and return attempt_id + first question."""
-        resp = client.post("/api/v1/quizzes/start", json={"book_id": book_with_questions})
+        resp = client.post(
+            "/api/v1/quizzes/start", json={"book_id": book_with_questions}
+        )
         data = resp.json()
         return data["attempt_id"], data["questions"][0]
 
@@ -168,7 +178,10 @@ class TestAnswerQuestion:
         attempt_id, question = active_attempt
         response = client.post(
             f"/api/v1/quizzes/{attempt_id}/answer",
-            json={"question_id": question["id"], "choice_id": question["choices"][0]["id"]},
+            json={
+                "question_id": question["id"],
+                "choice_id": question["choices"][0]["id"],
+            },
         )
         assert response.status_code == 200
         data = response.json()
@@ -179,14 +192,19 @@ class TestAnswerQuestion:
 
     def test_incorrect_answer_returns_false(self, client, book_with_questions):
         """Selecting an answer returns a response with is_correct field."""
-        resp = client.post("/api/v1/quizzes/start", json={"book_id": book_with_questions})
+        resp = client.post(
+            "/api/v1/quizzes/start", json={"book_id": book_with_questions}
+        )
         attempt_id = resp.json()["attempt_id"]
         question = resp.json()["questions"][0]
 
         # Answer any choice — response structure is what matters
         response = client.post(
             f"/api/v1/quizzes/{attempt_id}/answer",
-            json={"question_id": question["id"], "choice_id": question["choices"][0]["id"]},
+            json={
+                "question_id": question["id"],
+                "choice_id": question["choices"][0]["id"],
+            },
         )
         assert response.status_code == 200
         # is_correct is always present (whether true or false)
@@ -194,7 +212,9 @@ class TestAnswerQuestion:
 
     def test_duplicate_answer_rejected(self, client, book_with_questions):
         """Answering the same question twice returns 400."""
-        resp = client.post("/api/v1/quizzes/start", json={"book_id": book_with_questions})
+        resp = client.post(
+            "/api/v1/quizzes/start", json={"book_id": book_with_questions}
+        )
         attempt_id = resp.json()["attempt_id"]
         q = resp.json()["questions"][0]
         c = q["choices"][0]
@@ -237,7 +257,9 @@ class TestCompleteQuiz:
 
     def _start_and_answer_all(self, client, book_with_questions):
         """Start a quiz and answer all questions; return (attempt_id, questions)."""
-        resp = client.post("/api/v1/quizzes/start", json={"book_id": book_with_questions})
+        resp = client.post(
+            "/api/v1/quizzes/start", json={"book_id": book_with_questions}
+        )
         data = resp.json()
         self._answer_all(client, data["attempt_id"], data["questions"])
         return data["attempt_id"], data["questions"]
@@ -257,10 +279,27 @@ class TestCompleteQuiz:
         assert 0 <= data["percentage"] <= 100
         assert len(data["results"]) == 10
 
-    def test_complete_with_email_enqueues_results_email(self, client, book_with_questions, monkeypatch):
-        """Providing an email enqueues the quiz results email task."""
-        mock_task = MagicMock()
-        monkeypatch.setattr("app.tasks.email_tasks.send_quiz_results_email", mock_task)
+    def test_complete_with_email_sends_results_email(
+        self, client, book_with_questions, monkeypatch
+    ):
+        """Providing an email starts a background send of the quiz results email."""
+        sent = {}
+
+        def fake_send(recipient, subject, html):
+            sent["recipient"] = recipient
+            sent["subject"] = subject
+            sent["html"] = html
+
+        # Run the background thread synchronously so assertions are deterministic.
+        class SyncThread:
+            def __init__(self, target, daemon=True):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr("app.services.email_service.send_email", fake_send)
+        monkeypatch.setattr("app.api.quiz.threading.Thread", SyncThread)
 
         attempt_id, _ = self._start_and_answer_all(client, book_with_questions)
         resp = client.post(
@@ -269,41 +308,44 @@ class TestCompleteQuiz:
         )
         assert resp.status_code == 200
 
-        mock_task.delay.assert_called_once()
-        email, score, total, percentage, results_data = mock_task.delay.call_args[0]
-        body = resp.json()
-        assert email == "reader@example.com"
-        assert score == body["score"]
-        assert total == body["total"] == 10
-        assert percentage == body["percentage"]
-        assert len(results_data) == 10
-        for item in results_data:
-            assert set(item.keys()) == {
-                "question_id",
-                "question_text",
-                "selected_choice",
-                "correct_choice",
-                "is_correct",
-                "chapter",
-            }
+        assert sent.get("recipient") == "reader@example.com"
+        assert "Your Book Quiz results" in sent.get("subject", "")  # real builder used
+        assert "<html" in sent.get("html", "")
 
-    def test_complete_without_email_does_not_enqueue(self, client, book_with_questions, monkeypatch):
-        """No email in the request → the email task is not enqueued."""
-        mock_task = MagicMock()
-        monkeypatch.setattr("app.tasks.email_tasks.send_quiz_results_email", mock_task)
+    def test_complete_without_email_does_not_send(
+        self, client, book_with_questions, monkeypatch
+    ):
+        """No email in the request → nothing is sent."""
+        sent = []
+
+        def fake_send(recipient, subject, html):
+            sent.append(recipient)
+
+        monkeypatch.setattr("app.services.email_service.send_email", fake_send)
 
         attempt_id, _ = self._start_and_answer_all(client, book_with_questions)
         resp = client.post(f"/api/v1/quizzes/{attempt_id}/complete")
         assert resp.status_code == 200
-        mock_task.delay.assert_not_called()
+        assert sent == []
 
-    def test_complete_email_enqueue_failure_does_not_break_completion(
+    def test_complete_email_send_failure_does_not_break_completion(
         self, client, book_with_questions, monkeypatch
     ):
-        """Redis/Celery failure while enqueuing never breaks quiz completion."""
-        mock_task = MagicMock()
-        mock_task.delay.side_effect = Exception("redis down")
-        monkeypatch.setattr("app.tasks.email_tasks.send_quiz_results_email", mock_task)
+        """SMTP failure while sending never breaks quiz completion."""
+
+        def fake_send(recipient, subject, html):
+            raise ConnectionError("smtp down")
+
+        class SyncThread:
+            def __init__(self, target, daemon=True):
+                self._target = target
+
+            def start(self):
+                # send_email swallows SMTP errors; nothing should propagate
+                self._target()
+
+        monkeypatch.setattr("app.services.email_service.send_email", fake_send)
+        monkeypatch.setattr("app.api.quiz.threading.Thread", SyncThread)
 
         attempt_id, _ = self._start_and_answer_all(client, book_with_questions)
         resp = client.post(
@@ -315,7 +357,9 @@ class TestCompleteQuiz:
 
     def test_complete_without_answers_returns_400(self, client, book_with_questions):
         """Cannot complete a quiz with no answers."""
-        resp = client.post("/api/v1/quizzes/start", json={"book_id": book_with_questions})
+        resp = client.post(
+            "/api/v1/quizzes/start", json={"book_id": book_with_questions}
+        )
         attempt_id = resp.json()["attempt_id"]
 
         response = client.post(f"/api/v1/quizzes/{attempt_id}/complete")
@@ -324,7 +368,9 @@ class TestCompleteQuiz:
 
     def test_complete_already_completed_returns_400(self, client, book_with_questions):
         """Cannot complete an already completed quiz."""
-        resp = client.post("/api/v1/quizzes/start", json={"book_id": book_with_questions})
+        resp = client.post(
+            "/api/v1/quizzes/start", json={"book_id": book_with_questions}
+        )
         attempt_id = resp.json()["attempt_id"]
         q = resp.json()["questions"][0]
 

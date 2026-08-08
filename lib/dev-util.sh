@@ -298,7 +298,7 @@ Database:
 Build & deploy:
   build [all|backend|frontend]
                        Build production Docker images
-  deploy [all|backend|frontend|worker] [--staging]
+  deploy [all|backend|frontend] [--staging]
                        Deploy to Cloud Run / Firebase Hosting
 
 Operations:

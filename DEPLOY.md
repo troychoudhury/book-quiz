@@ -70,20 +70,20 @@ redis://default:<password>@<host>.upstash.io:6379
 > **Note:** You only need the Redis URL, not the REST API token. The backend
 > uses `redis-py` with the native Redis protocol over TCP.
 
-### Celery worker (required for email + background tasks)
+### Celery worker (background tasks)
 
-The backend uses Celery (broker = Redis) for background jobs, including the
-quiz-results email. A Celery worker must be running somewhere to consume the
-queue:
+The backend uses Celery (broker = Redis) for background jobs. However, the
+**quiz-results email does not use Celery** — it is sent directly from the
+API process on a background thread (no worker required). This keeps
+infrastructure simple and free: there is no always-on worker to run.
+
+If future background tasks need a queue consumer:
 
 - **Local dev:** `./dev up` starts a Celery worker automatically (both modes).
 - **Fly.io:** `fly.toml` already defines a `worker` process — nothing to do.
-- **Cloud Run (current production):** `./dev deploy worker` (or `./dev deploy`)
-  deploys a second Cloud Run service `book-quiz-api-worker` running
-  `worker_entrypoint.sh` (Celery + a tiny health listener so the container
-  passes Cloud Run's `$PORT` health check). It runs with `--min-instances=1`
-  (stays alive to drain the queue), `--max-instances=1`, `--no-cpu-throttling`
-  (CPU always-on for background work), and `--no-allow-unauthenticated`.
+- **Cloud Run:** you would need a separate long-running consumer (e.g. a
+  Cloud Run service with `--min-instances 1`, a VM, or a scheduled drain
+  job). Note this costs ~$40+/mo for an always-on instance.
 
 Upstash officially supports Celery as a broker (blocking pops work over the
 native protocol), so no special Redis config is needed.

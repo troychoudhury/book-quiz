@@ -1,5 +1,7 @@
 """Quiz API endpoints."""
+
 import random
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -32,39 +34,51 @@ logger = structlog.get_logger()
 QUIZ_QUESTION_COUNT = 10
 
 
-def _enqueue_results_email(
+def _send_results_email_async(
     email: str,
     score: int,
     total: int,
     percentage: float,
     results: list[dict],
 ) -> None:
-    """Enqueue the quiz results email Celery task (best-effort).
+    """Send the quiz results email on a background thread (best-effort).
 
-    Imported lazily to avoid a circular import with app.worker. Any failure
-    (e.g. Redis down) is logged and swallowed — email must never block or
-    break quiz completion.
+    Runs in-process (daemon thread) so no Celery worker is required — the
+    email is sent directly from the API process via SMTP. Any failure is
+    logged and swallowed; email must never block or break quiz completion.
     """
     try:
-        from app.tasks.email_tasks import send_quiz_results_email
+        from app.services.email_service import build_quiz_results_email, send_email
 
-        send_quiz_results_email.delay(email, score, total, percentage, results)
+        def _send() -> None:
+            subject, html = build_quiz_results_email(
+                score=score,
+                total=total,
+                percentage=percentage,
+                results=results,
+                recipient_email=email,
+            )
+            send_email(email, subject, html)
+
+        threading.Thread(target=_send, daemon=True).start()
         logger.info(
-            "quiz.results_email_enqueued",
+            "quiz.results_email_send_started",
             email=email,
             score=score,
             total=total,
         )
     except Exception:
         logger.exception(
-            "quiz.results_email_enqueue_failed",
+            "quiz.results_email_send_failed",
             email=email,
             score=score,
             total=total,
         )
 
 
-@router.post("/start", response_model=StartQuizResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/start", response_model=StartQuizResponse, status_code=status.HTTP_201_CREATED
+)
 def start_quiz(
     request: StartQuizRequest,
     db: Session = Depends(get_db),
@@ -79,15 +93,22 @@ def start_quiz(
     try:
         book_id = uuid.UUID(request.book_id)
     except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid book ID.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid book ID."
+        )
 
     book = db.query(Book).filter(Book.id == book_id).first()
     if not book:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Book not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Book not found."
+        )
 
     all_questions = db.query(Question).filter(Question.book_id == book_id).all()
     if not all_questions:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No questions available for this book.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No questions available for this book.",
+        )
 
     # Exclude questions the user has already answered (if authenticated).
     answered_ids: set[uuid.UUID] = set()
@@ -168,17 +189,25 @@ def answer_question(
         qid = uuid.UUID(request.question_id)
         cid = uuid.UUID(request.choice_id)
     except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid UUID format.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid UUID format."
+        )
 
     attempt = db.query(QuizAttempt).filter(QuizAttempt.id == aid).first()
     if not attempt:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attempt not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Attempt not found."
+        )
     if attempt.completed_at:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Quiz already completed.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Quiz already completed."
+        )
 
     question = db.query(Question).filter(Question.id == qid).first()
     if not question:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Question not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Question not found."
+        )
 
     # The question must belong to the attempt's book.
     if question.book_id != attempt.book_id:
@@ -188,7 +217,9 @@ def answer_question(
         )
 
     # The choice must belong to this question.
-    choice = db.query(Choice).filter(Choice.id == cid, Choice.question_id == qid).first()
+    choice = (
+        db.query(Choice).filter(Choice.id == cid, Choice.question_id == qid).first()
+    )
     if not choice:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -237,13 +268,19 @@ def complete_quiz(
     try:
         aid = uuid.UUID(attempt_id)
     except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid attempt ID.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid attempt ID."
+        )
 
     attempt = db.query(QuizAttempt).filter(QuizAttempt.id == aid).first()
     if not attempt:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attempt not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Attempt not found."
+        )
     if attempt.completed_at:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Quiz already completed.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Quiz already completed."
+        )
 
     answers = db.query(QuizAnswer).filter(QuizAnswer.attempt_id == aid).all()
     if not answers:
@@ -286,7 +323,7 @@ def complete_quiz(
     # Best-effort results email — never blocks or breaks completion.
     if request is not None and request.email:
         results_data = [item.model_dump() for item in results]
-        _enqueue_results_email(request.email, score, total, percentage, results_data)
+        _send_results_email_async(request.email, score, total, percentage, results_data)
 
     return CompleteQuizResponse(
         attempt_id=str(attempt.id),
