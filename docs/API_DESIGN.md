@@ -151,6 +151,11 @@ Authorization: Bearer <access_token>
 
 ## Admin / Background
 
+All admin endpoints require the `X-Admin-Key` header (verified with a
+constant-time comparison). This is a single shared key with no per-user
+RBAC — accepted limitation for a single-admin app (S1). All mutations are
+logged server-side (audit trail: action, task id, params).
+
 ### POST /admin/hydrate
 ```json
 // Request (requires admin key)
@@ -161,7 +166,65 @@ Authorization: Bearer <access_token>
 
 ### GET /admin/hydrate/{task_id}/status
 ```json
-// Response 200
+// Response 200  (Cache-Control: no-store)
 { "task_id": "uuid", "status": "completed", "books_processed": 100,
   "questions_generated": 1500, "errors": [] }
+```
+
+### POST /admin/hydrate-all
+```json
+// Request (requires admin key) — hydrates grades 1-12 in the background
+// (one worker thread; per-grade atomic commits; 30 min wall-clock timeout;
+// only one hydrate/hydrate-all job may run at a time → 409 while busy).
+{ "start_grade": 1, "end_grade": 12, "books_per_grade": 100 }
+// Response 202
+{ "task_id": "uuid", "status": "processing",
+  "message": "Hydration job started for grades 1-12" }
+```
+
+### GET /admin/hydrate-all/{task_id}/status
+```json
+// Response 200  (Cache-Control: no-store)
+{
+  "task_id": "uuid",
+  "status": "completed",          // pending|processing|completed|failed
+  "start_grade": 1, "end_grade": 12, "books_per_grade": 100,
+  "grades": [
+    { "grade": 1, "age": 6, "status": "completed",
+      "books_processed": 100, "error": null },
+    { "grade": 2, "age": 7, "status": "failed",
+      "books_processed": 0, "error": "HTTPStatusError: operation failed (see server logs)" }
+  ],
+  "books_processed": 100,
+  "questions_generated": 0,
+  "errors": ["grade 2: HTTPStatusError: operation failed (see server logs)"]
+}
+```
+
+Error strings in task payloads are sanitized (generic message + exception
+type); full details go to server logs to avoid leaking DB credentials.
+
+### POST /admin/generate-questions
+```json
+// Request (requires admin key)
+{ "book_id": "uuid" }
+// Response 202
+{ "task_id": "uuid", "status": "processing", "message": "Question generation started" }
+```
+
+### POST /admin/generate-questions-all
+```json
+// Request (requires admin key) — generates questions for every book that
+// has none yet; optional max_books cap.
+{ "max_books": 500 }
+// Response 202
+{ "task_id": "uuid", "status": "processing",
+  "message": "Question generation started for 500 books" }
+```
+
+### GET /admin/generate-questions/{task_id}/status
+```json
+// Response 200  (Cache-Control: no-store)
+{ "task_id": "uuid", "status": "completed", "books_processed": 500,
+  "questions_generated": 5000, "errors": [] }
 ```

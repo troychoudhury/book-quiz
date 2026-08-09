@@ -1,5 +1,6 @@
 """Acceptance tests for admin hydration management API."""
 
+import json
 import os
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-acceptance-tests")
@@ -182,7 +183,7 @@ class TestHydrateStatusEndpoint:
         assert isinstance(data["errors"], list)
 
 
-def _fake_fetch_books(self, age, limit=100):
+def _fake_fetch_books(self, age, limit=100, commit=True):
     """Stand-in for HydrationService.fetch_top_books_for_age.
 
     Returns 3 books per call so per-grade counts are predictable without
@@ -303,7 +304,7 @@ class TestHydrateAllEndpoint:
         """A second hydrate-all call while one is processing returns 409."""
         release = threading.Event()
 
-        def blocking_fetch(self, age, limit=100):
+        def blocking_fetch(self, age, limit=100, commit=True):
             release.wait(timeout=10)
             return [
                 {
@@ -395,3 +396,109 @@ class TestHydrateAllStatusEndpoint:
         assert data["books_processed"] == 9
         assert data["questions_generated"] == 0
         assert data["errors"] == []
+
+
+class TestCr9ReviewFindings:
+    """Regression tests for the book-quiz-cr9 review findings."""
+
+    def test_worker_crash_marks_task_failed_not_stuck(
+        self, client, admin_headers, monkeypatch
+    ):
+        """T2: SessionLocal failure marks the task failed instead of stuck."""
+
+        def broken_session_local():
+            raise RuntimeError("db connection failed")
+
+        monkeypatch.setattr(admin_module, "SessionLocal", broken_session_local)
+        resp = client.post(
+            "/api/v1/admin/hydrate-all",
+            json={"start_grade": 1, "end_grade": 2},
+            headers=admin_headers,
+        )
+        assert resp.status_code == 202
+        task_id = resp.json()["task_id"]
+
+        data = _wait_for_task(client, admin_headers, task_id)
+        assert data["status"] == "failed"
+        assert data["errors"]
+
+        # A crashed task must not keep blocking new runs with a phantom
+        # 'processing' status.
+        second = client.post(
+            "/api/v1/admin/hydrate-all",
+            json={"start_grade": 1, "end_grade": 2},
+            headers=admin_headers,
+        )
+        assert second.status_code == 202
+
+    def test_error_messages_are_sanitized(self, client, admin_headers, monkeypatch):
+        """H1: raw exception text never leaks into task payloads."""
+
+        def leaking_fetch(self, age, limit=100, commit=True):
+            raise RuntimeError("password=supersecret host=db.internal:5432")
+
+        monkeypatch.setattr(HydrationService, "fetch_top_books_for_age", leaking_fetch)
+        resp = client.post(
+            "/api/v1/admin/hydrate-all",
+            json={"start_grade": 1, "end_grade": 1},
+            headers=admin_headers,
+        )
+        task_id = resp.json()["task_id"]
+
+        data = _wait_for_task(client, admin_headers, task_id)
+        assert data["status"] == "failed"
+        payload = json.dumps(data)
+        assert "supersecret" not in payload
+        assert "db.internal" not in payload
+
+    def test_status_endpoints_return_no_store(self, client, admin_headers, monkeypatch):
+        """H3: status responses carry Cache-Control: no-store."""
+        monkeypatch.setattr(
+            HydrationService, "fetch_top_books_for_age", _fake_fetch_books
+        )
+        resp = client.post(
+            "/api/v1/admin/hydrate-all",
+            json={"start_grade": 1, "end_grade": 1},
+            headers=admin_headers,
+        )
+        task_id = resp.json()["task_id"]
+        status_resp = client.get(
+            f"/api/v1/admin/hydrate-all/{task_id}/status", headers=admin_headers
+        )
+        assert status_resp.headers.get("cache-control") == "no-store"
+
+        # generate-questions status endpoint too
+        gen_resp = client.post(
+            "/api/v1/admin/generate-questions",
+            json={"book_id": str(uuid.uuid4())},
+            headers=admin_headers,
+        )
+        assert gen_resp.status_code == 202
+        gen_status = client.get(
+            f"/api/v1/admin/generate-questions/{gen_resp.json()['task_id']}/status",
+            headers=admin_headers,
+        )
+        assert gen_status.headers.get("cache-control") == "no-store"
+
+    def test_hydrate_all_status_accepts_sync_task_id(
+        self, client, admin_headers, monkeypatch
+    ):
+        """M1: hydrate-all status on a sync /hydrate task returns 200, not 500."""
+        monkeypatch.setattr(
+            HydrationService, "fetch_top_books_for_age", _fake_fetch_books
+        )
+        hydrate_resp = client.post(
+            "/api/v1/admin/hydrate",
+            json={"age": 10, "limit": 5},
+            headers=admin_headers,
+        )
+        task_id = hydrate_resp.json()["task_id"]
+
+        resp = client.get(
+            f"/api/v1/admin/hydrate-all/{task_id}/status", headers=admin_headers
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["grades"] == []
+        assert data["books_processed"] == 3  # sync task's own counter
+        assert data["status"] == "completed"

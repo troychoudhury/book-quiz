@@ -87,7 +87,9 @@ class HydrationService:
         self.db = db
         self.openai_api_key = openai_api_key
 
-    def fetch_top_books_for_age(self, age: int, limit: int = 100) -> list[dict]:
+    def fetch_top_books_for_age(
+        self, age: int, limit: int = 100, commit: bool = True
+    ) -> list[dict]:
         """Fetch books for a given age group from OpenLibrary.
 
         Uses the OpenLibrary search API to find books by subject.
@@ -97,6 +99,9 @@ class HydrationService:
         Args:
             age: Target age (6-18)
             limit: Maximum number of books to fetch
+            commit: When True (default), all books for this age commit in one
+                transaction — per-age atomicity. Pass False to defer the
+                commit to the caller (e.g. to batch several ages).
 
         Returns:
             List of stored book metadata dicts
@@ -130,8 +135,10 @@ class HydrationService:
                         )
                         response.raise_for_status()
                         data = response.json()
+                        docs = data.get("docs", [])
 
-                        for doc in data.get("docs", []):
+                        new_this_page = 0
+                        for doc in docs:
                             isbn = self._extract_isbn(doc)
                             if not isbn or isbn in existing_isbns:
                                 continue
@@ -146,16 +153,29 @@ class HydrationService:
                                     "isbn": book.isbn,
                                 }
                             )
+                            new_this_page += 1
                             if len(stored) >= limit:
                                 break
 
-                        if len(data.get("docs", [])) == 0:
+                        if len(docs) == 0:
                             # Subject exhausted — move on to the next subject.
+                            break
+                        if new_this_page == 0:
+                            # Entire page was already-known ISBNs — paging
+                            # deeper mostly returns the same dedup-heavy set,
+                            # so stop scanning this subject (S-M3 fix).
                             break
                         page += 1
 
-        except Exception as e:
-            logger.error(f"Failed to fetch books: {e}")
+            if commit:
+                # Per-grade atomicity: all books for this age commit together
+                # (or roll back together on failure) instead of per-book.
+                self.db.commit()
+
+        except Exception:
+            if commit:
+                self.db.rollback()
+            logger.error(f"Failed to fetch books for age {age}")
             raise
 
         logger.info(f"Stored {len(stored)} new books for age {age}")
@@ -218,7 +238,10 @@ class HydrationService:
             age_range_upper=age + 2,
         )
         self.db.add(book)
-        self.db.commit()
+        # No commit here: the caller commits once per age/grade so a partial
+        # failure rolls back cleanly (per-grade atomicity). flush() makes the
+        # row visible to in-session queries and assigns the primary key.
+        self.db.flush()
         self.db.refresh(book)
         return book
 
@@ -297,7 +320,9 @@ class HydrationService:
                 stored += 1
 
             self.db.commit()
-            logger.info(f"Stored {stored} questions for book {book_id} ('{book.title}')")
+            logger.info(
+                f"Stored {stored} questions for book {book_id} ('{book.title}')"
+            )
             return stored
         except Exception as e:
             self.db.rollback()
