@@ -16,7 +16,7 @@ from sqlalchemy.pool import StaticPool
 from app.models.base import Base
 from app.models.book import Book
 from app.services.hydration_service import HydrationService
-from app.services.question_generator import QuestionGenerator, GeneratedQuestion
+from app.services.question_generator import QuestionGenerator
 
 
 @pytest.fixture
