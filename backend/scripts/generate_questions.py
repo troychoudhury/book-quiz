@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -62,7 +63,7 @@ def main() -> None:
         f"base_url: {settings.openai_base_url or 'openai default'}"
     )
 
-    engine = create_engine(db_url)
+    engine = create_engine(db_url, poolclass=NullPool)  # one conn per worker session
     Session = sessionmaker(bind=engine)
 
     done = load_state()
@@ -142,7 +143,6 @@ def _gen(engine, bid: str, title: str, author: str) -> int:
         if attempt < 2:
             time.sleep(5 * (attempt + 1))
     return q
-
 
 if __name__ == "__main__":
     main()
