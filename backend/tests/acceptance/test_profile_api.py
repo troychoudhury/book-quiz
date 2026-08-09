@@ -1,4 +1,5 @@
 """Acceptance tests for user profile API — profile and book progress."""
+
 import os
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-acceptance-tests")
@@ -20,7 +21,6 @@ from app.models.base import Base
 from app.models.book import Book
 from app.models.question import Question, Choice
 from app.models.quiz import QuizAttempt, QuizAnswer
-from app.models.user import User
 from app.services.auth_service import AuthService
 
 # In-memory SQLite
@@ -41,14 +41,15 @@ def override_get_db():
         db.close()
 
 
-app.dependency_overrides[get_db] = override_get_db
-
-
 @pytest.fixture(autouse=True)
 def setup_db():
+    # Set the get_db override per-test (not at import) so this file's engine
+    # wins even when pytest imports all acceptance modules at collection time.
+    app.dependency_overrides[get_db] = override_get_db
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
+    app.dependency_overrides.pop(get_db, None)
 
 
 @pytest.fixture
@@ -104,12 +105,14 @@ def book_with_progress(auth_headers):
             db.add(q)
             db.flush()
             for pos in range(4):
-                db.add(Choice(
-                    question_id=q.id,
-                    choice_text=f"Choice {pos}",
-                    is_correct=(pos == 0),
-                    position=pos,
-                ))
+                db.add(
+                    Choice(
+                        question_id=q.id,
+                        choice_text=f"Choice {pos}",
+                        is_correct=(pos == 0),
+                        position=pos,
+                    )
+                )
 
     # Create 2 completed attempts
     for attempt_num in range(1, 3):
@@ -124,15 +127,19 @@ def book_with_progress(auth_headers):
         db.add(attempt)
         db.flush()
         # Add some answers
-        questions = db.query(Question).filter(Question.book_id == book.id).limit(10).all()
+        questions = (
+            db.query(Question).filter(Question.book_id == book.id).limit(10).all()
+        )
         for q in questions:
             choice = db.query(Choice).filter(Choice.question_id == q.id).first()
-            db.add(QuizAnswer(
-                attempt_id=attempt.id,
-                question_id=q.id,
-                selected_choice_id=choice.id,
-                is_correct=choice.is_correct,
-            ))
+            db.add(
+                QuizAnswer(
+                    attempt_id=attempt.id,
+                    question_id=q.id,
+                    selected_choice_id=choice.id,
+                    is_correct=choice.is_correct,
+                )
+            )
 
     book_id = str(book.id)
     db.commit()
@@ -158,7 +165,9 @@ class TestProfileEndpoint:
         assert data["display_name"] == "Profile Tester"
         assert "id" in data
 
-    def test_profile_includes_book_progress(self, client, auth_headers, book_with_progress):
+    def test_profile_includes_book_progress(
+        self, client, auth_headers, book_with_progress
+    ):
         """Profile includes books with attempt history."""
         headers, _ = auth_headers
         response = client.get("/api/v1/users/me/profile", headers=headers)
@@ -192,7 +201,9 @@ class TestBookProgressEndpoint:
         response = client.get(f"/api/v1/users/me/books/{book_with_progress}/progress")
         assert response.status_code == 401
 
-    def test_progress_returns_detailed_info(self, client, auth_headers, book_with_progress):
+    def test_progress_returns_detailed_info(
+        self, client, auth_headers, book_with_progress
+    ):
         """Progress includes total_questions, remaining, can_retake."""
         headers, _ = auth_headers
         response = client.get(
@@ -211,14 +222,18 @@ class TestBookProgressEndpoint:
     def test_progress_invalid_book_id_returns_400(self, client, auth_headers):
         """Invalid UUID returns 400."""
         headers, _ = auth_headers
-        response = client.get("/api/v1/users/me/books/not-a-uuid/progress", headers=headers)
+        response = client.get(
+            "/api/v1/users/me/books/not-a-uuid/progress", headers=headers
+        )
         assert response.status_code == 400
 
     def test_progress_nonexistent_book_returns_404(self, client, auth_headers):
         """Valid UUID for nonexistent book returns 404."""
         headers, _ = auth_headers
         fake_id = str(uuid.uuid4())
-        response = client.get(f"/api/v1/users/me/books/{fake_id}/progress", headers=headers)
+        response = client.get(
+            f"/api/v1/users/me/books/{fake_id}/progress", headers=headers
+        )
         assert response.status_code == 404
 
     def test_progress_unattempted_book(self, client, auth_headers):
@@ -245,7 +260,9 @@ class TestBookProgressEndpoint:
         book_id = str(book.id)
         db.close()
 
-        response = client.get(f"/api/v1/users/me/books/{book_id}/progress", headers=headers)
+        response = client.get(
+            f"/api/v1/users/me/books/{book_id}/progress", headers=headers
+        )
         assert response.status_code == 200
         data = response.json()
         assert data["attempts_completed"] == 0

@@ -4,6 +4,7 @@ These tests exercise the real HTTP endpoints with a TestClient, an in-memory
 SQLite database, a fake Redis, and a mocked provider token exchange (the
 provider HTTP calls are external and must never run in tests).
 """
+
 import os
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-acceptance-tests")
@@ -47,9 +48,9 @@ def override_get_db():
         db.close()
 
 
-app.dependency_overrides[get_db] = override_get_db
-
-from app.api import oauth as oauth_api  # noqa: E402  (needs app.dependency_overrides first)
+# get_db override is set per-test in setup_db() below so this file's engine
+# wins even when pytest imports all acceptance modules at collection time.
+from app.api import oauth as oauth_api  # noqa: E402
 
 
 class FakeRedis:
@@ -72,9 +73,13 @@ class FakeRedis:
 @pytest.fixture(autouse=True)
 def setup_db():
     """Create tables before each test and drop after."""
+    # Set the get_db override per-test (not at import) so this file's engine
+    # wins even when pytest imports all acceptance modules at collection time.
+    app.dependency_overrides[get_db] = override_get_db
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
+    app.dependency_overrides.pop(get_db, None)
 
 
 @pytest.fixture(autouse=True)
@@ -82,7 +87,9 @@ def oauth_environment(monkeypatch):
     """Configure providers, inject the fake Redis, and reset it per test."""
     for provider in OAuthService.PROVIDERS:
         monkeypatch.setattr(settings, f"{provider}_client_id", f"test-{provider}-id")
-        monkeypatch.setattr(settings, f"{provider}_client_secret", f"test-{provider}-secret")
+        monkeypatch.setattr(
+            settings, f"{provider}_client_secret", f"test-{provider}-secret"
+        )
     oauth_api.oauth._redis = FakeRedis()
     yield
     for provider in OAuthService.PROVIDERS:
@@ -122,7 +129,11 @@ class TestProvidersEndpoint:
         assert response.status_code == 200
         providers = response.json()["providers"]
         names = {p["provider"]: p["name"] for p in providers}
-        assert names == {"google": "Google", "facebook": "Facebook", "microsoft": "Microsoft"}
+        assert names == {
+            "google": "Google",
+            "facebook": "Facebook",
+            "microsoft": "Microsoft",
+        }
 
     def test_provider_hidden_when_not_configured(self, client, monkeypatch):
         monkeypatch.setattr(settings, "microsoft_client_id", "")
@@ -142,7 +153,9 @@ class TestOAuthLogin:
         assert response.status_code == 404
 
     def test_link_account_requires_auth(self, client):
-        response = client.get("/api/v1/auth/oauth/google/login", params={"link_account": "true"})
+        response = client.get(
+            "/api/v1/auth/oauth/google/login", params={"link_account": "true"}
+        )
         assert response.status_code == 401
 
     def test_link_account_embeds_user_in_state(self, client):
@@ -175,13 +188,18 @@ class TestOAuthLogin:
 
 
 class TestOAuthCallback:
-    def test_full_login_flow_creates_user_and_issues_jwt(self, client, monkeypatch, google_userinfo):
+    def test_full_login_flow_creates_user_and_issues_jwt(
+        self, client, monkeypatch, google_userinfo
+    ):
         """First-time SSO signup: user created, tokens delivered via fragment."""
         _, _, state = _start_oauth(client)
-        monkeypatch.setattr(oauth_api.oauth, "exchange_code", lambda *a, **kw: google_userinfo)
+        monkeypatch.setattr(
+            oauth_api.oauth, "exchange_code", lambda *a, **kw: google_userinfo
+        )
 
         response = client.get(
-            "/api/v1/auth/oauth/google/callback", params={"code": "auth-code", "state": state}
+            "/api/v1/auth/oauth/google/callback",
+            params={"code": "auth-code", "state": state},
         )
         assert response.status_code == 302
         location = response.headers["location"]
@@ -204,17 +222,29 @@ class TestOAuthCallback:
     def test_state_deleted_after_callback(self, client, monkeypatch, google_userinfo):
         """B3: the Redis state key must be consumed (single use)."""
         _, _, state = _start_oauth(client)
-        monkeypatch.setattr(oauth_api.oauth, "exchange_code", lambda *a, **kw: google_userinfo)
-        client.get("/api/v1/auth/oauth/google/callback", params={"code": "c", "state": state})
+        monkeypatch.setattr(
+            oauth_api.oauth, "exchange_code", lambda *a, **kw: google_userinfo
+        )
+        client.get(
+            "/api/v1/auth/oauth/google/callback", params={"code": "c", "state": state}
+        )
         assert oauth_api.oauth.consume_state(state) is None
 
-    def test_replay_of_consumed_state_rejected(self, client, monkeypatch, google_userinfo):
+    def test_replay_of_consumed_state_rejected(
+        self, client, monkeypatch, google_userinfo
+    ):
         """Reusing a consumed state must fail with 400 (CSRF protection)."""
         _, _, state = _start_oauth(client)
-        monkeypatch.setattr(oauth_api.oauth, "exchange_code", lambda *a, **kw: google_userinfo)
-        first = client.get("/api/v1/auth/oauth/google/callback", params={"code": "c", "state": state})
+        monkeypatch.setattr(
+            oauth_api.oauth, "exchange_code", lambda *a, **kw: google_userinfo
+        )
+        first = client.get(
+            "/api/v1/auth/oauth/google/callback", params={"code": "c", "state": state}
+        )
         assert first.status_code == 302
-        replay = client.get("/api/v1/auth/oauth/google/callback", params={"code": "c", "state": state})
+        replay = client.get(
+            "/api/v1/auth/oauth/google/callback", params={"code": "c", "state": state}
+        )
         assert replay.status_code == 400
 
     def test_state_mismatch_returns_400(self, client):
@@ -239,7 +269,9 @@ class TestOAuthCallback:
         db.close()
 
         _, _, state = _start_oauth(client)
-        monkeypatch.setattr(oauth_api.oauth, "exchange_code", lambda *a, **kw: google_userinfo)
+        monkeypatch.setattr(
+            oauth_api.oauth, "exchange_code", lambda *a, **kw: google_userinfo
+        )
         response = client.get(
             "/api/v1/auth/oauth/google/callback", params={"code": "c", "state": state}
         )
@@ -267,7 +299,9 @@ class TestOAuthCallback:
             headers={"Authorization": f"Bearer {token}"},
         )
         state = parse_qs(urlparse(response.headers["location"]).query)["state"][0]
-        monkeypatch.setattr(oauth_api.oauth, "exchange_code", lambda *a, **kw: google_userinfo)
+        monkeypatch.setattr(
+            oauth_api.oauth, "exchange_code", lambda *a, **kw: google_userinfo
+        )
 
         response = client.get(
             "/api/v1/auth/oauth/google/callback", params={"code": "c", "state": state}
@@ -288,7 +322,8 @@ class TestOAuthCallback:
         db.close()
 
         response = client.post(
-            "/api/v1/auth/login", json={"email": "sso@example.com", "password": "whatever123"}
+            "/api/v1/auth/login",
+            json={"email": "sso@example.com", "password": "whatever123"},
         )
         assert response.status_code == 401
 
@@ -314,8 +349,12 @@ class TestOAuthLinks:
         token, user_id = self._register_and_token()
         db = TestingSessionLocal()
         auth = AuthService(db)
-        auth.link_oauth_provider(user_id, "google", "g1", "links@example.com", "Linker", None)
-        auth.link_oauth_provider(user_id, "microsoft", "m1", "links@example.com", "Linker", None)
+        auth.link_oauth_provider(
+            user_id, "google", "g1", "links@example.com", "Linker", None
+        )
+        auth.link_oauth_provider(
+            user_id, "microsoft", "m1", "links@example.com", "Linker", None
+        )
         db.close()
 
         headers = {"Authorization": f"Bearer {token}"}
@@ -325,7 +364,9 @@ class TestOAuthLinks:
         assert providers == {"google", "microsoft"}
         assert all(item["linked_at"] for item in response.json())
 
-        response = client.delete("/api/v1/users/me/oauth-links/microsoft", headers=headers)
+        response = client.delete(
+            "/api/v1/users/me/oauth-links/microsoft", headers=headers
+        )
         assert response.status_code == 204
         remaining = client.get("/api/v1/users/me/oauth-links", headers=headers).json()
         assert {item["provider"] for item in remaining} == {"google"}
@@ -333,7 +374,8 @@ class TestOAuthLinks:
     def test_unlink_not_linked_returns_404(self, client):
         token, _ = self._register_and_token()
         response = client.delete(
-            "/api/v1/users/me/oauth-links/google", headers={"Authorization": f"Bearer {token}"}
+            "/api/v1/users/me/oauth-links/google",
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 404
 
@@ -342,12 +384,15 @@ class TestOAuthLinks:
         db = TestingSessionLocal()
         auth = AuthService(db)
         user = auth.create_user_from_oauth("only@example.com", "Only SSO", None)
-        auth.link_oauth_provider(user.id, "google", "g1", "only@example.com", "Only SSO", None)
+        auth.link_oauth_provider(
+            user.id, "google", "g1", "only@example.com", "Only SSO", None
+        )
         token = auth.create_access_token(user.id)
         db.close()
 
         response = client.delete(
-            "/api/v1/users/me/oauth-links/google", headers={"Authorization": f"Bearer {token}"}
+            "/api/v1/users/me/oauth-links/google",
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 400
         assert "last authentication method" in response.json()["detail"]
@@ -356,13 +401,18 @@ class TestOAuthLinks:
         db = TestingSessionLocal()
         auth = AuthService(db)
         user = auth.create_user_from_oauth("multi@example.com", "Multi", None)
-        auth.link_oauth_provider(user.id, "google", "g1", "multi@example.com", "Multi", None)
-        auth.link_oauth_provider(user.id, "facebook", "f1", "multi@example.com", "Multi", None)
+        auth.link_oauth_provider(
+            user.id, "google", "g1", "multi@example.com", "Multi", None
+        )
+        auth.link_oauth_provider(
+            user.id, "facebook", "f1", "multi@example.com", "Multi", None
+        )
         token = auth.create_access_token(user.id)
         db.close()
 
         response = client.delete(
-            "/api/v1/users/me/oauth-links/google", headers={"Authorization": f"Bearer {token}"}
+            "/api/v1/users/me/oauth-links/google",
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 204
 
@@ -371,7 +421,9 @@ class TestProfileFields:
     def test_profile_includes_avatar_and_has_password(self, client):
         db = TestingSessionLocal()
         auth = AuthService(db)
-        user = auth.create_user_from_oauth("avatar@example.com", "Avatar", "https://img/a.png")
+        user = auth.create_user_from_oauth(
+            "avatar@example.com", "Avatar", "https://img/a.png"
+        )
         token = auth.create_access_token(user.id)
         db.close()
 
@@ -403,13 +455,19 @@ class TestAuthServiceOAuthMethods:
         db = TestingSessionLocal()
         auth = AuthService(db)
         user = auth.create_user_from_oauth("dup@example.com", "Dup", None)
-        first = auth.link_oauth_provider(user.id, "google", "g1", "dup@example.com", "Dup", None)
-        second = auth.link_oauth_provider(user.id, "google", "g1", "dup@example.com", "Dup", None)
+        first = auth.link_oauth_provider(
+            user.id, "google", "g1", "dup@example.com", "Dup", None
+        )
+        second = auth.link_oauth_provider(
+            user.id, "google", "g1", "dup@example.com", "Dup", None
+        )
         assert first is True
         assert second is False
         count = (
             db.query(UserOAuthLink)
-            .filter(UserOAuthLink.user_id == user.id, UserOAuthLink.provider == "google")
+            .filter(
+                UserOAuthLink.user_id == user.id, UserOAuthLink.provider == "google"
+            )
             .count()
         )
         assert count == 1
